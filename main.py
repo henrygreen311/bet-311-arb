@@ -48,6 +48,8 @@ SPORTRADAR_URL = f"{BASE}/en-ng/sports/home/api/prematch/sportsradar/match"
 SR_WIDGET_ROOT = "https://widgets.fn.sportradar.com/common/en/Etc:UTC/gismo"
 SR_MATCH_INFO_PATH = "match_info"
 SR_H2H_PATH = "stats_team_versusrecent"
+SR_LASTX_PATH = "stats_team_lastx"
+SR_SPORT_ID = 20
 REFERER = f"{BASE}/en-ng/sports/table-tennis/competitions"
 ROW_ID = 1
 OUTPUT_FILE = os.path.join(_HERE, "TT_today.json")
@@ -207,6 +209,50 @@ def _extract_h2h(payload, current_home_uid, current_away_uid):
     return results
 
 
+def _extract_team_lastx(payload, tracked_uid, tracked_is_home):
+    results = []
+    for d in payload.get("doc") or []:
+        data = (d or {}).get("data") or {}
+        for match in data.get("matches") or []:
+            ft = ((match.get("periods") or {}).get("ft")) or {}
+            home_score = ft.get("home")
+            away_score = ft.get("away")
+            if home_score is None or away_score is None:
+                continue
+
+            teams = match.get("teams") or {}
+            match_home_uid = (teams.get("home") or {}).get("uid")
+            match_away_uid = (teams.get("away") or {}).get("uid")
+
+            if match_home_uid == tracked_uid:
+                tracked_score = home_score
+                opp_score = away_score
+            elif match_away_uid == tracked_uid:
+                tracked_score = away_score
+                opp_score = home_score
+            else:
+                continue
+
+            if tracked_score == opp_score:
+                winner = "draw"
+            else:
+                tracked_won = tracked_score > opp_score
+                if tracked_is_home:
+                    winner = "home" if tracked_won else "away"
+                else:
+                    winner = "away" if tracked_won else "home"
+
+            date_raw = (match.get("time") or {}).get("date") or ""
+            results.append({
+                "ft": f"{tracked_score}-{opp_score}",
+                "date": date_raw.replace("/", "-"),
+                "winner": winner,
+            })
+            if len(results) >= H2H_LIMIT:
+                return results
+    return results
+
+
 def scan_once():
     print("Fetching today's table tennis matches...")
     try:
@@ -274,6 +320,8 @@ def scan_once():
             row["awayUid"] = None
             row["odds"] = _extract_odds(event)
             row["h2h"] = None
+            row["home_last5"] = None
+            row["away_last5"] = None
             print(f"  {row['id']}: skipped ({err or 'no sportradar match'})")
             continue
 
@@ -288,6 +336,8 @@ def scan_once():
             row["awayUid"] = None
             row["odds"] = _extract_odds(event)
             row["h2h"] = None
+            row["home_last5"] = None
+            row["away_last5"] = None
             print(f"  {row['id']}: match_info failed ({ierr})")
             continue
 
@@ -298,6 +348,8 @@ def scan_once():
 
         if home_uid is None or away_uid is None:
             row["h2h"] = None
+            row["home_last5"] = None
+            row["away_last5"] = None
             print(f"  {row['id']}: uids not found")
             continue
 
@@ -307,15 +359,37 @@ def scan_once():
         if not isinstance(h2h_payload, dict):
             row["h2h"] = None
             print(f"  {row['id']}: h2h failed ({herr})")
-            continue
+        else:
+            row["h2h"] = _extract_h2h(h2h_payload, home_uid, away_uid)
 
-        row["h2h"] = _extract_h2h(h2h_payload, home_uid, away_uid)
+        home_lastx_payload, hlerr = _fetch_sr_widget(
+            sr_token, f"{SR_LASTX_PATH}/{home_uid}/{SR_SPORT_ID}"
+        )
+        if not isinstance(home_lastx_payload, dict):
+            row["home_last5"] = None
+            print(f"  {row['id']}: home_last5 failed ({hlerr})")
+        else:
+            row["home_last5"] = _extract_team_lastx(
+                home_lastx_payload, home_uid, tracked_is_home=True
+            )
+
+        away_lastx_payload, alerr = _fetch_sr_widget(
+            sr_token, f"{SR_LASTX_PATH}/{away_uid}/{SR_SPORT_ID}"
+        )
+        if not isinstance(away_lastx_payload, dict):
+            row["away_last5"] = None
+            print(f"  {row['id']}: away_last5 failed ({alerr})")
+        else:
+            row["away_last5"] = _extract_team_lastx(
+                away_lastx_payload, away_uid, tracked_is_home=False
+            )
+
         matched += 1
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    print(f"Done. {matched}/{len(summary)} events with h2h data.")
+    print(f"Done. {matched}/{len(summary)} events with full data.")
     print(f"Saved to {OUTPUT_FILE}.")
     return True
 
