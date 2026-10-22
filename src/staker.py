@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 RECENT_WINDOW_DAYS = 30
 MIN_RECENT_MATCHES = 2
+MIN_STREAK_LENGTH = 3
 
 
 def _parse_date(date_str):
@@ -12,6 +13,13 @@ def _parse_date(date_str):
         return datetime.strptime(date_str, "%d-%m-%y")
     except ValueError:
         return None
+
+
+def _last_n_wins(h2h, n, side):
+    recent = h2h[:n]
+    if len(recent) < n:
+        return False
+    return all(m.get("winner") == side for m in recent)
 
 
 def _analyze_event(event):
@@ -59,6 +67,9 @@ def _analyze_event(event):
         return None
 
     if recent_count < MIN_RECENT_MATCHES:
+        return None
+
+    if won_4_of_5 and not _last_n_wins(h2h, MIN_STREAK_LENGTH, dominant_side):
         return None
 
     return {
@@ -109,7 +120,7 @@ def run(path="TT_today.json"):
         if p["criteria"] == "won_all":
             basis = f"won all {p['h2h_total']} h2h"
         else:
-            basis = f"won {max(p['home_wins'], p['away_wins'])}/{p['h2h_total']} h2h"
+            basis = f"won {max(p['home_wins'], p['away_wins'])}/{p['h2h_total']} h2h (last {MIN_STREAK_LENGTH} in a row)"
         print(
             f"  {p['name']}  |  pick {side} {price_str}  |  "
             f"{basis}  |  {p['recent_matches']}/{p['h2h_total']} recent"
