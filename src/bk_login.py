@@ -203,7 +203,7 @@ async def _extract_sr_token(page) -> str:
 async def login() -> bool:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            headless=False,
+            headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
         # Original viewport — restored.
