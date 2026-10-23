@@ -32,7 +32,8 @@ ROW_ID = 1
 TIMEOUT             = 300_000
 MATCH_STATS_WAIT_MS = 60_000
 SR_REQUEST_WAIT_MS  = 45_000
-OVERLAY_WAIT_S      = 5
+SR_POLL_INTERVAL_S  = 0.5
+SR_MAX_ATTEMPTS     = 2   # first open, then one close+reopen retry
 
 
 # DB Helpers
@@ -130,6 +131,21 @@ async def _click(page, selector: str, timeout: int) -> None:
         await page.click(selector, timeout=timeout, force=True)
 
 
+async def _click_stats_button(page) -> None:
+    """Click the first match-stats button with the same safety net as
+    _click (accept cookies, strip banner, force on retry)."""
+    await _accept_cookies(page)
+    await _strip_cookie_banner(page)
+    try:
+        await page.locator(MATCH_STATS_SELECTOR).first.click(timeout=15_000)
+    except Exception:
+        await _accept_cookies(page)
+        await _strip_cookie_banner(page)
+        await page.locator(MATCH_STATS_SELECTOR).first.click(
+            timeout=15_000, force=True
+        )
+
+
 # Sportradar token extraction
 
 def _extract_token_from_url(url: str):
@@ -149,18 +165,34 @@ def _extract_token_from_url(url: str):
     return None
 
 
+async def _scan_for_token(sr_urls, timeout_s: float):
+    """Poll the captured sportradar URLs for up to timeout_s seconds
+    and return the first T= token found, or None on timeout."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        for url in list(sr_urls):
+            token = _extract_token_from_url(url)
+            if token:
+                print(f"[login] sr_token   : found in {url[:120]}...")
+                return token
+        await asyncio.sleep(SR_POLL_INTERVAL_S)
+    return None
+
+
 async def _extract_sr_token(page) -> str:
     """Navigate to the today page, click the first match-stats button,
     and capture the sportradar widget token from any request the page
     makes to widgets.fn.sportradar.com.
 
-    Unlike the previous approach (page.expect_request with a 'T=' filter),
-    this accumulates EVERY request to the sportradar widget host from the
-    moment just before we click, then after the click + overlay-dismiss
-    sequence scans the captured URLs for one that carries a T= param.
-    This is much more robust: it catches CORS preflights, telemetry calls,
-    requests fired on overlay dismissal, and anything else — regardless
-    of whether the first captured URL is the one carrying the token."""
+    A page-level 'request' listener accumulates every request to the
+    sportradar widget host for the entire duration of the retry loop.
+
+    If the first open doesn't yield a request carrying T= within
+    SR_REQUEST_WAIT_MS, the stats button is clicked again (closing the
+    widget) then clicked once more (re-opening it) — the listener stays
+    attached throughout, so any request fired during the close/reopen
+    cycle is also captured."""
     print("[login] opening today's matches page ...")
     try:
         await page.goto(TODAY_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
@@ -180,8 +212,9 @@ async def _extract_sr_token(page) -> str:
         print(f"[login] sr_token   : no match-stats-area found ({e})")
         return None
 
-    # Collect every request to the sportradar widget host BEFORE clicking,
-    # so nothing fired during the click / overlay-dismiss sequence is missed.
+    # Collect every request to the sportradar widget host. The listener
+    # lives for the whole retry loop, so nothing fired during the
+    # close/reopen cycle is missed.
     sr_urls: list = []
 
     def _capture(req):
@@ -195,44 +228,41 @@ async def _extract_sr_token(page) -> str:
     page.on("request", _capture)
 
     try:
-        print("[login] clicking first match stats button ...")
-        try:
-            await page.locator(MATCH_STATS_SELECTOR).first.click(timeout=15_000)
-        except Exception:
-            await _accept_cookies(page)
-            await _strip_cookie_banner(page)
-            await page.locator(MATCH_STATS_SELECTOR).first.click(
-                timeout=15_000, force=True
+        for attempt in range(1, SR_MAX_ATTEMPTS + 1):
+            if attempt == 1:
+                print("[login] clicking first match stats button ...")
+            else:
+                # First 45s poll failed → toggle the widget closed, then
+                # reopen it, still listening for sportradar requests.
+                print(
+                    f"[login] attempt {attempt}: closing + reopening stats widget ..."
+                )
+                try:
+                    await _click_stats_button(page)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"[login] attempt {attempt}: close click failed ({e})")
+                try:
+                    await _click_stats_button(page)
+                except Exception as e:
+                    print(f"[login] attempt {attempt}: reopen click failed ({e})")
+                    continue
+
+            if attempt == 1:
+                await _click_stats_button(page)
+
+            print(
+                f"[login] attempt {attempt}: polling {SR_REQUEST_WAIT_MS // 1000}s "
+                f"for a T= request ..."
             )
+            token = await _scan_for_token(sr_urls, SR_REQUEST_WAIT_MS / 1000.0)
+            if token:
+                return token
 
-        # After the click, an overlay covers the widget and blocks the
-        # sportradar API from firing. Give it time to fully render, then
-        # click a neutral spot (center-right of the viewport) to dismiss.
-        print(f"[login] waiting {OVERLAY_WAIT_S}s for overlay, then dismissing ...")
-        await asyncio.sleep(OVERLAY_WAIT_S)
-
-        viewport = page.viewport_size or {"width": 1920, "height": 1080}
-        x = int(viewport["width"] * 0.75)
-        y = int(viewport["height"] * 0.50)
-        try:
-            await page.mouse.click(x, y)
-            print(f"[login] clicked ({x},{y}) to dismiss overlay")
-        except Exception as e:
-            print(f"[login] overlay dismiss click failed ({e})")
-
-        # Poll captured URLs until one with a T= param shows up, or
-        # SR_REQUEST_WAIT_MS elapses. Not every sportradar request carries
-        # T= (e.g. the CORS preflight OPTIONS won't), so we scan the whole
-        # list rather than assuming the first captured URL is the right one.
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + (SR_REQUEST_WAIT_MS / 1000.0)
-        while loop.time() < deadline:
-            for url in list(sr_urls):
-                token = _extract_token_from_url(url)
-                if token:
-                    print(f"[login] sr_token   : found in {url[:120]}...")
-                    return token
-            await asyncio.sleep(0.5)
+            print(
+                f"[login] attempt {attempt}: no T= request yet "
+                f"({len(sr_urls)} sportradar url(s) captured so far)"
+            )
 
         if not sr_urls:
             print("[login] sr_token   : no sportradar requests captured")
