@@ -57,6 +57,12 @@ H2H_LIMIT = 5
 SCAN_INTERVAL = 5 * 60
 
 
+def _log(*args, **kwargs):
+    """Only print if the live tracker hasn't started yet."""
+    if not analyzer.is_tracking():
+        print(*args, **kwargs)
+
+
 def _betking_headers(cookie):
     return {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -261,7 +267,7 @@ def _extract_team_lastx(payload, tracked_uid, tracked_is_home):
 
 
 def scan_once():
-    print("Fetching today's table tennis matches...")
+    _log("Fetching today's table tennis matches...")
     try:
         sb = _get_supabase()
         resp = (
@@ -272,20 +278,20 @@ def scan_once():
             .execute()
         )
     except Exception as e:
-        print(f"Error: supabase unavailable - {e}")
+        _log(f"Error: supabase unavailable - {e}")
         return False, None
 
     if not resp.data:
-        print(f"Error: no row with id={ROW_ID} in bet_arb.")
+        _log(f"Error: no row with id={ROW_ID} in bet_arb.")
         return False, None
     row = resp.data[0]
     cookie = (row.get("cookie") or "").strip()
     sr_token = (row.get("sr_token") or "").strip()
     if not cookie:
-        print(f"Error: cookie is empty for id={ROW_ID}.")
+        _log(f"Error: cookie is empty for id={ROW_ID}.")
         return False, None
     if not sr_token:
-        print(f"Error: sr_token is empty for id={ROW_ID}.")
+        _log(f"Error: sr_token is empty for id={ROW_ID}.")
         return False, None
 
     try:
@@ -296,24 +302,24 @@ def scan_once():
             timeout=30,
         )
     except requests.RequestException as e:
-        print(f"Error: request failed - {e}")
+        _log(f"Error: request failed - {e}")
         return False, None
     if r.status_code >= 400:
-        print(f"Error: server returned HTTP {r.status_code}")
+        _log(f"Error: server returned HTTP {r.status_code}")
         return False, None
 
     try:
         data = r.json()
     except ValueError:
-        print("Error: response is not valid JSON.")
+        _log("Error: response is not valid JSON.")
         return False, None
 
     events = _extract_events(data)
     if not events:
-        print("No matches found today.")
+        _log("No matches found today.")
         return False, cookie
 
-    # Load existing data to prevent duplicate API calls and keep previous matches
+    # Load existing data
     existing_data = {}
     if os.path.exists(OUTPUT_FILE):
         try:
@@ -325,13 +331,13 @@ def scan_once():
 
     summary = []
     new_count = 0
-    print(f"Found {len(events)} matches from API.")
-    print("Looking up sportradar data for new matches...")
+    _log(f"Found {len(events)} matches from API.")
+    _log("Looking up sportradar data for new matches...")
 
     for event in events:
         row = _summarize(event)
         
-        # If we already processed this match, just update odds and skip the heavy API calls
+        # If already processed, just update odds
         if row["id"] in existing_data:
             existing_data[row["id"]]["odds"] = _extract_odds(event)
             continue
@@ -347,7 +353,7 @@ def scan_once():
             row["h2h"] = None
             row["home_last5"] = None
             row["away_last5"] = None
-            print(f"  {row['id']}: skipped ({err or 'no sportradar match'})")
+            _log(f"  {row['id']}: skipped ({err or 'no sportradar match'})")
             summary.append(row)
             continue
 
@@ -364,7 +370,7 @@ def scan_once():
             row["h2h"] = None
             row["home_last5"] = None
             row["away_last5"] = None
-            print(f"  {row['id']}: match_info failed ({ierr})")
+            _log(f"  {row['id']}: match_info failed ({ierr})")
             summary.append(row)
             continue
 
@@ -377,7 +383,7 @@ def scan_once():
             row["h2h"] = None
             row["home_last5"] = None
             row["away_last5"] = None
-            print(f"  {row['id']}: uids not found")
+            _log(f"  {row['id']}: uids not found")
             summary.append(row)
             continue
 
@@ -386,7 +392,7 @@ def scan_once():
         )
         if not isinstance(h2h_payload, dict):
             row["h2h"] = None
-            print(f"  {row['id']}: h2h failed ({herr})")
+            _log(f"  {row['id']}: h2h failed ({herr})")
         else:
             row["h2h"] = _extract_h2h(h2h_payload, home_uid, away_uid)
 
@@ -395,7 +401,7 @@ def scan_once():
         )
         if not isinstance(home_lastx_payload, dict):
             row["home_last5"] = None
-            print(f"  {row['id']}: home_last5 failed ({hlerr})")
+            _log(f"  {row['id']}: home_last5 failed ({hlerr})")
         else:
             row["home_last5"] = _extract_team_lastx(
                 home_lastx_payload, home_uid, tracked_is_home=True
@@ -406,7 +412,7 @@ def scan_once():
         )
         if not isinstance(away_lastx_payload, dict):
             row["away_last5"] = None
-            print(f"  {row['id']}: away_last5 failed ({alerr})")
+            _log(f"  {row['id']}: away_last5 failed ({alerr})")
         else:
             row["away_last5"] = _extract_team_lastx(
                 away_lastx_payload, away_uid, tracked_is_home=False
@@ -420,8 +426,8 @@ def scan_once():
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(final_data, f, indent=2, ensure_ascii=False)
 
-    print(f"Done. {new_count} new matches processed, {len(existing_data)} previously saved.")
-    print(f"Total matches saved to {OUTPUT_FILE}: {len(final_data)}")
+    _log(f"Done. {new_count} new matches processed, {len(existing_data)} previously saved.")
+    _log(f"Total matches saved to {OUTPUT_FILE}: {len(final_data)}")
     return True, cookie
 
 
@@ -429,7 +435,7 @@ def main():
     cycle = 0
     while True:
         cycle += 1
-        print(f"\n=== Cycle {cycle} ===")
+        _log(f"\n=== Cycle {cycle} ===")
         
         ok, cookie = scan_once()
 
@@ -439,11 +445,11 @@ def main():
                 if picks:
                     analyzer.add_picks(picks, cookie)
             except Exception as e:
-                print(f"Error in analyzer: {e}")
+                _log(f"Error in analyzer: {e}")
         else:
-            print("Scan failed - skipping analyzer this cycle.")
+            _log("Scan failed - skipping analyzer this cycle.")
 
-        print(f"Waiting {SCAN_INTERVAL // 60} minutes for next cycle...")
+        _log(f"Waiting {SCAN_INTERVAL // 60} minutes for next cycle...")
         try:
             time.sleep(SCAN_INTERVAL)
         except KeyboardInterrupt:

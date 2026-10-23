@@ -22,13 +22,18 @@ EVENT_URL = f"{BASE_URL}/en-ng/sports/live/api/event"
 EVENT_DATA = "routes/($locale).sports.live.api.event"
 
 # --- Global State for Live Tracker ---
-_pending_picks = {}      # { name: pick_dict }
-_active_fixtures = {}    # { fixture_id: pick_dict }
-_processed_fixtures = set()  # { pick_id } - Keeps track of matches that are done/dropped
+_pending_picks = {}          # { name: pick_dict }
+_active_fixtures = {}        # { fixture_id: pick_dict }
+_processed_fixtures = set()  # { pick_id } - Matches that dropped/finished
 _lock = threading.Lock()
 _tracker_started = False
 _executor = ThreadPoolExecutor(max_workers=10)
 _worker_id_counter = itertools.count(1)
+
+
+def is_tracking():
+    with _lock:
+        return _tracker_started
 
 
 def _get_headers(cookie):
@@ -287,9 +292,15 @@ def _poll_overview_loop(cookie):
                             with _lock:
                                 if fixture_id in _active_fixtures:
                                     continue
+                                
                                 pick = _pending_picks.pop(ev_name, None)
                                 if not pick:
                                     continue
+                                
+                                # Final safety check against processed fixtures
+                                if pick["id"] in _processed_fixtures:
+                                    continue
+
                                 _active_fixtures[fixture_id] = pick
 
                             worker_id = next(_worker_id_counter)
@@ -313,19 +324,24 @@ def add_picks(picks, cookie):
     except Exception as e:
         print(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
 
-    print(f"analyzer: {len(picks)} qualifying pick(s) saved to tt_analyzer.json")
-    for p in picks:
-        side = p["dominant_side"].upper()
-        print(f"  {p['name']} | pick {side} | {p['criteria']}")
-
-    # 2. Add to pending queue, skipping already processed matches
+    # 2. Add to pending queue, skipping processed/active matches
     with _lock:
+        active_ids = {p["id"] for p in _active_fixtures.values()}
         for p in picks:
-            if p["id"] in _processed_fixtures:
+            if p["id"] in _processed_fixtures or p["id"] in active_ids:
                 continue
             live_name = p["name"].lower().replace(" vs ", " - ")
             if live_name not in _pending_picks:
                 _pending_picks[live_name] = p
+                
+        # Log only new additions
+        new_added = len(_pending_picks)
+
+    if new_added > 0:
+        print(f"analyzer: {len(picks)} qualifying pick(s) saved to tt_analyzer.json")
+        for p in picks:
+            side = p["dominant_side"].upper()
+            print(f"  {p['name']} | pick {side} | {p['criteria']}")
 
     # 3. Start tracker thread if not already running
     if not _tracker_started:
@@ -353,7 +369,6 @@ def analyze_file(path="TT_today.json"):
             picks.append(p)
 
     if not picks:
-        print("analyzer: no qualifying picks this cycle.")
         return []
 
     return picks
