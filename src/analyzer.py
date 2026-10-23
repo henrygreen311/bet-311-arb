@@ -26,9 +26,16 @@ _pending_picks = {}          # { name: pick_dict }
 _active_fixtures = {}        # { fixture_id: pick_dict }
 _processed_fixtures = set()  # { pick_id } - Matches that dropped/finished
 _lock = threading.Lock()
+_print_lock = threading.Lock()
 _tracker_started = False
 _executor = ThreadPoolExecutor(max_workers=10)
 _worker_id_counter = itertools.count(1)
+
+
+def _log(*args, **kwargs):
+    """Thread-safe logging for workers."""
+    with _print_lock:
+        print(*args, **kwargs, flush=True)
 
 
 def is_tracking():
@@ -195,9 +202,7 @@ def _analyze_event(event):
 def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
-    print(f"  [worker{worker_id}] Started tracking {name} (ID: {fixture_id})")
-
-    logged_qualified = False
+    _log(f"  [worker{worker_id}] Started tracking {name} (ID: {fixture_id})")
 
     while True:
         time.sleep(5)
@@ -213,53 +218,46 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
 
         event = data.get("event")
         if not event:
-            print(f"  [worker{worker_id}] Match ended or removed: {name}")
+            _log(f"  [worker{worker_id}] Match ended or removed: {name}")
             break
 
-        scores_str = event.get("periodScores", "")
-        if not scores_str:
+        home_score = event.get("homeScore")
+        away_score = event.get("awayScore")
+
+        if home_score is None or away_score is None:
             continue
 
-        sets = [s.strip() for s in scores_str.split(" - ")]
-        
-        if len(sets) >= 2:
-            try:
-                s1_home, s1_away = map(int, sets[0].split(":"))
-                s2_home, s2_away = map(int, sets[1].split(":"))
-            except ValueError:
-                continue
-
-            home_won_1 = s1_home > s1_away
-            home_won_2 = s2_home > s2_away
-
-            if dominant == "home":
-                won_first_two = home_won_1 and home_won_2
-            else:
-                won_first_two = (not home_won_1) and (not home_won_2)
-
-            # Drop if dominant didn't win first 2 sets
-            if not won_first_two:
-                print(f"  [worker{worker_id}] [Dropped] {name} failed to win first 2 sets ({scores_str})")
+        if dominant == "home":
+            if away_score > 0:
+                _log(f"  [worker{worker_id}] [Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
                 break
-
-            # Qualified if won first 2 sets and in set 3+
-            if won_first_two and len(sets) >= 3 and not logged_qualified:
-                logged_qualified = True
-                
+            if home_score >= 2:
                 odds_val = None
                 markets = data.get("markets", [])
                 for m in markets:
-                    if m.get("marketTypeId") == 9388: # Winner Market
+                    if m.get("marketTypeId") == 9388:
                         for sel in m.get("selections", []):
-                            if dominant == "home" and sel.get("name") == "1":
+                            if sel.get("name") == "1":
                                 odds_val = sel.get("odd", {}).get("value")
-                            elif dominant == "away" and sel.get("name") == "2":
-                                odds_val = sel.get("odd", {}).get("value")
-
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                print(f"  [worker{worker_id}] [QUALIFIED] {name} | {dominant.upper()} won first 2 sets [{scores_str}] | Live Odds: {odds_str}")
+                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | HOME won first 2 sets | Live Odds: {odds_str}")
+                break
+        else:
+            if home_score > 0:
+                _log(f"  [worker{worker_id}] [Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
+                break
+            if away_score >= 2:
+                odds_val = None
+                markets = data.get("markets", [])
+                for m in markets:
+                    if m.get("marketTypeId") == 9388:
+                        for sel in m.get("selections", []):
+                            if sel.get("name") == "2":
+                                odds_val = sel.get("odd", {}).get("value")
+                odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
+                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | AWAY won first 2 sets | Live Odds: {odds_str}")
+                break
 
-    # Cleanup and mark as permanently processed
     with _lock:
         _active_fixtures.pop(fixture_id, None)
         _processed_fixtures.add(pick["id"])
@@ -297,7 +295,6 @@ def _poll_overview_loop(cookie):
                                 if not pick:
                                     continue
                                 
-                                # Final safety check against processed fixtures
                                 if pick["id"] in _processed_fixtures:
                                     continue
 
@@ -322,7 +319,7 @@ def add_picks(picks, cookie):
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(picks, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
+        _log(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
 
     # 2. Add to pending queue, skipping processed/active matches
     with _lock:
@@ -333,21 +330,11 @@ def add_picks(picks, cookie):
             live_name = p["name"].lower().replace(" vs ", " - ")
             if live_name not in _pending_picks:
                 _pending_picks[live_name] = p
-                
-        # Log only new additions
-        new_added = len(_pending_picks)
-
-    if new_added > 0:
-        print(f"analyzer: {len(picks)} qualifying pick(s) saved to tt_analyzer.json")
-        for p in picks:
-            side = p["dominant_side"].upper()
-            print(f"  {p['name']} | pick {side} | {p['criteria']}")
 
     # 3. Start tracker thread if not already running
     if not _tracker_started:
         _tracker_started = True
         threading.Thread(target=_poll_overview_loop, args=(cookie,), daemon=True).start()
-        print("  [Tracker] Live tracking started in background (max 10 workers).")
 
 
 def analyze_file(path="TT_today.json"):
@@ -356,10 +343,10 @@ def analyze_file(path="TT_today.json"):
         with open(path, "r", encoding="utf-8") as f:
             events = json.load(f)
     except FileNotFoundError:
-        print(f"analyzer: {path} not found.")
+        _log(f"analyzer: {path} not found.")
         return []
     except json.JSONDecodeError:
-        print(f"analyzer: {path} is not valid JSON.")
+        _log(f"analyzer: {path} is not valid JSON.")
         return []
 
     picks = []
@@ -367,8 +354,5 @@ def analyze_file(path="TT_today.json"):
         p = _analyze_event(event)
         if p:
             picks.append(p)
-
-    if not picks:
-        return []
 
     return picks
