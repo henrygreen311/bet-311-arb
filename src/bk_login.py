@@ -151,10 +151,16 @@ def _extract_token_from_url(url: str):
 
 async def _extract_sr_token(page) -> str:
     """Navigate to the today page, click the first match-stats button,
-    dismiss the overlay that blocks the widget, and capture the
-    sportradar token from the resulting request.
+    and capture the sportradar widget token from any request the page
+    makes to widgets.fn.sportradar.com.
 
-    Returns the token string, or None on any failure."""
+    Unlike the previous approach (page.expect_request with a 'T=' filter),
+    this accumulates EVERY request to the sportradar widget host from the
+    moment just before we click, then after the click + overlay-dismiss
+    sequence scans the captured URLs for one that carries a T= param.
+    This is much more robust: it catches CORS preflights, telemetry calls,
+    requests fired on overlay dismissal, and anything else — regardless
+    of whether the first captured URL is the one carrying the token."""
     print("[login] opening today's matches page ...")
     try:
         await page.goto(TODAY_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
@@ -174,48 +180,73 @@ async def _extract_sr_token(page) -> str:
         print(f"[login] sr_token   : no match-stats-area found ({e})")
         return None
 
+    # Collect every request to the sportradar widget host BEFORE clicking,
+    # so nothing fired during the click / overlay-dismiss sequence is missed.
+    sr_urls: list = []
+
+    def _capture(req):
+        try:
+            if SPORTRADAR_HOST in req.url:
+                sr_urls.append(req.url)
+                print(f"[login] sr request captured: {req.url}")
+        except Exception:
+            pass
+
+    page.on("request", _capture)
+
     try:
-        async with page.expect_request(
-            lambda req: SPORTRADAR_HOST in req.url and "T=" in req.url,
-            timeout=SR_REQUEST_WAIT_MS,
-        ) as req_info:
-            print("[login] clicking first match stats button ...")
-            try:
-                await page.locator(MATCH_STATS_SELECTOR).first.click(timeout=15_000)
-            except Exception:
-                await _accept_cookies(page)
-                await _strip_cookie_banner(page)
-                await page.locator(MATCH_STATS_SELECTOR).first.click(
-                    timeout=15_000, force=True
-                )
+        print("[login] clicking first match stats button ...")
+        try:
+            await page.locator(MATCH_STATS_SELECTOR).first.click(timeout=15_000)
+        except Exception:
+            await _accept_cookies(page)
+            await _strip_cookie_banner(page)
+            await page.locator(MATCH_STATS_SELECTOR).first.click(
+                timeout=15_000, force=True
+            )
 
-            # After the click, an overlay covers the widget and blocks
-            # the sportradar API from firing. Give it time to fully
-            # render, then click a neutral spot (center-right of the
-            # viewport) to dismiss it — that's what lets the widget
-            # load and fire the match_info request.
-            print(f"[login] waiting {OVERLAY_WAIT_S}s for overlay, then dismissing ...")
-            await asyncio.sleep(OVERLAY_WAIT_S)
+        # After the click, an overlay covers the widget and blocks the
+        # sportradar API from firing. Give it time to fully render, then
+        # click a neutral spot (center-right of the viewport) to dismiss.
+        print(f"[login] waiting {OVERLAY_WAIT_S}s for overlay, then dismissing ...")
+        await asyncio.sleep(OVERLAY_WAIT_S)
 
-            viewport = page.viewport_size or {"width": 1920, "height": 1080}
-            x = int(viewport["width"] * 0.75)
-            y = int(viewport["height"] * 0.50)
-            try:
-                await page.mouse.click(x, y)
-                print(f"[login] clicked ({x},{y}) to dismiss overlay")
-            except Exception as e:
-                print(f"[login] overlay dismiss click failed ({e})")
+        viewport = page.viewport_size or {"width": 1920, "height": 1080}
+        x = int(viewport["width"] * 0.75)
+        y = int(viewport["height"] * 0.50)
+        try:
+            await page.mouse.click(x, y)
+            print(f"[login] clicked ({x},{y}) to dismiss overlay")
+        except Exception as e:
+            print(f"[login] overlay dismiss click failed ({e})")
 
-        request = await req_info.value
-    except Exception as e:
-        print(f"[login] sr_token   : click / expect_request failed ({e})")
+        # Poll captured URLs until one with a T= param shows up, or
+        # SR_REQUEST_WAIT_MS elapses. Not every sportradar request carries
+        # T= (e.g. the CORS preflight OPTIONS won't), so we scan the whole
+        # list rather than assuming the first captured URL is the right one.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + (SR_REQUEST_WAIT_MS / 1000.0)
+        while loop.time() < deadline:
+            for url in list(sr_urls):
+                token = _extract_token_from_url(url)
+                if token:
+                    print(f"[login] sr_token   : found in {url[:120]}...")
+                    return token
+            await asyncio.sleep(0.5)
+
+        if not sr_urls:
+            print("[login] sr_token   : no sportradar requests captured")
+        else:
+            print(
+                f"[login] sr_token   : {len(sr_urls)} sportradar request(s) "
+                f"captured but none had T= param"
+            )
         return None
-
-    token = _extract_token_from_url(request.url)
-    if not token:
-        print(f"[login] sr_token   : no T= param in url: {request.url}")
-        return None
-    return token
+    finally:
+        try:
+            page.remove_listener("request", _capture)
+        except Exception:
+            pass
 
 
 # Login
