@@ -1,9 +1,17 @@
+
 name: betking
 
 on:
   repository_dispatch:
-    types: [run-sporty]
+    types:
+      - run-sporty
   workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: betking-monitor
+  cancel-in-progress: true
 
 jobs:
   run-monitor:
@@ -17,15 +25,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run main.py
         env:
-          PYTHONUNBUFFERED: "1"
-          PYTHONIOENCODING: "utf-8"
-        run: |
-          timeout 355m python3 -u main.py || true
+          PYTHONUNBUFFERED: '1'
+          PYTHONIOENCODING: utf-8
+        run: timeout 355m python3 -u main.py || true
