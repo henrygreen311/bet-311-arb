@@ -313,12 +313,30 @@ def scan_once():
         print("No matches found today.")
         return False, cookie
 
-    summary = [_summarize(e) for e in events]
-    print(f"Found {len(summary)} matches.")
-    print("Looking up sportradar data...")
+    # Load existing data to prevent duplicate API calls and keep previous matches
+    existing_data = {}
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+                for ev in json.load(f):
+                    existing_data[ev["id"]] = ev
+        except Exception:
+            pass
 
-    matched = 0
-    for event, row in zip(events, summary):
+    summary = []
+    new_count = 0
+    print(f"Found {len(events)} matches from API.")
+    print("Looking up sportradar data for new matches...")
+
+    for event in events:
+        row = _summarize(event)
+        
+        # If we already processed this match, just update odds and skip the heavy API calls
+        if row["id"] in existing_data:
+            existing_data[row["id"]]["odds"] = _extract_odds(event)
+            continue
+
+        new_count += 1
         sr, err = _fetch_sportradar(cookie, row["id"])
         if not (isinstance(sr, dict) and sr.get("sportRadarMatchId")):
             row["sportRadarMatchId"] = None
@@ -330,6 +348,7 @@ def scan_once():
             row["home_last5"] = None
             row["away_last5"] = None
             print(f"  {row['id']}: skipped ({err or 'no sportradar match'})")
+            summary.append(row)
             continue
 
         row["sportRadarMatchId"] = sr.get("sportRadarMatchId")
@@ -346,6 +365,7 @@ def scan_once():
             row["home_last5"] = None
             row["away_last5"] = None
             print(f"  {row['id']}: match_info failed ({ierr})")
+            summary.append(row)
             continue
 
         home_uid, away_uid = _extract_uids(info)
@@ -358,6 +378,7 @@ def scan_once():
             row["home_last5"] = None
             row["away_last5"] = None
             print(f"  {row['id']}: uids not found")
+            summary.append(row)
             continue
 
         h2h_payload, herr = _fetch_sr_widget(
@@ -391,13 +412,16 @@ def scan_once():
                 away_lastx_payload, away_uid, tracked_is_home=False
             )
 
-        matched += 1
+        summary.append(row)
+
+    # Merge existing matches with newly processed ones
+    final_data = list(existing_data.values()) + summary
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
+        json.dump(final_data, f, indent=2, ensure_ascii=False)
 
-    print(f"Done. {matched}/{len(summary)} events with full data.")
-    print(f"Saved to {OUTPUT_FILE}.")
+    print(f"Done. {new_count} new matches processed, {len(existing_data)} previously saved.")
+    print(f"Total matches saved to {OUTPUT_FILE}: {len(final_data)}")
     return True, cookie
 
 
@@ -413,7 +437,6 @@ def main():
             try:
                 picks = analyzer.analyze_file(OUTPUT_FILE)
                 if picks:
-                    # This adds picks to the tracker, starts background thread if needed
                     analyzer.add_picks(picks, cookie)
             except Exception as e:
                 print(f"Error in analyzer: {e}")

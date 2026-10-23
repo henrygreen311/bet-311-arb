@@ -2,6 +2,7 @@ import json
 import os
 import time
 import threading
+import itertools
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -21,11 +22,13 @@ EVENT_URL = f"{BASE_URL}/en-ng/sports/live/api/event"
 EVENT_DATA = "routes/($locale).sports.live.api.event"
 
 # --- Global State for Live Tracker ---
-_pending_picks = {}    # { name: pick_dict }
-_active_fixtures = {}  # { fixture_id: pick_dict }
+_pending_picks = {}      # { name: pick_dict }
+_active_fixtures = {}    # { fixture_id: pick_dict }
+_processed_fixtures = set()  # { pick_id } - Keeps track of matches that are done/dropped
 _lock = threading.Lock()
 _tracker_started = False
 _executor = ThreadPoolExecutor(max_workers=10)
+_worker_id_counter = itertools.count(1)
 
 
 def _get_headers(cookie):
@@ -184,10 +187,10 @@ def _analyze_event(event):
 # 2. LIVE MATCH TRACKER WORKERS
 # ==========================================
 
-def _track_match_live(pick, fixture_id, cookie):
+def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
-    print(f"  [Worker] Started tracking {name} (ID: {fixture_id})")
+    print(f"  [worker{worker_id}] Started tracking {name} (ID: {fixture_id})")
 
     logged_qualified = False
 
@@ -205,7 +208,7 @@ def _track_match_live(pick, fixture_id, cookie):
 
         event = data.get("event")
         if not event:
-            print(f"  [Worker] Match ended or removed: {name}")
+            print(f"  [worker{worker_id}] Match ended or removed: {name}")
             break
 
         scores_str = event.get("periodScores", "")
@@ -231,7 +234,7 @@ def _track_match_live(pick, fixture_id, cookie):
 
             # Drop if dominant didn't win first 2 sets
             if not won_first_two:
-                print(f"  [Dropped] {name} failed to win first 2 sets ({scores_str})")
+                print(f"  [worker{worker_id}] [Dropped] {name} failed to win first 2 sets ({scores_str})")
                 break
 
             # Qualified if won first 2 sets and in set 3+
@@ -249,52 +252,52 @@ def _track_match_live(pick, fixture_id, cookie):
                                 odds_val = sel.get("odd", {}).get("value")
 
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                print(f"  [QUALIFIED] {name} | {dominant.upper()} won first 2 sets [{scores_str}] | Live Odds: {odds_str}")
+                print(f"  [worker{worker_id}] [QUALIFIED] {name} | {dominant.upper()} won first 2 sets [{scores_str}] | Live Odds: {odds_str}")
 
-    # Cleanup
+    # Cleanup and mark as permanently processed
     with _lock:
         _active_fixtures.pop(fixture_id, None)
+        _processed_fixtures.add(pick["id"])
 
 
 def _poll_overview_loop(cookie):
-    global _pending_picks
-    
     while True:
-        time.sleep(60)
-        
-        with _lock:
-            if not _pending_picks:
-                continue
-            current_pending = dict(_pending_picks)
-
         try:
-            r = requests.get(f"{OVERVIEW_URL}?_data={OVERVIEW_DATA}", headers=_get_headers(cookie), timeout=10)
-            if r.status_code != 200:
-                continue
-            data = r.json()
+            with _lock:
+                if not _pending_picks:
+                    current_pending = None
+                else:
+                    current_pending = dict(_pending_picks)
+
+            if current_pending:
+                r = requests.get(f"{OVERVIEW_URL}?_data={OVERVIEW_DATA}", headers=_get_headers(cookie), timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    live_events = []
+                    for sport in data.get("sportData", []):
+                        for tourney in sport.get("tournaments", []):
+                            for ev in tourney.get("events", []):
+                                live_events.append(ev)
+
+                    for ev in live_events:
+                        ev_name = ev.get("name", "").lower().replace(" vs ", " - ")
+                        if ev_name in current_pending:
+                            fixture_id = ev.get("id")
+                            
+                            with _lock:
+                                if fixture_id in _active_fixtures:
+                                    continue
+                                pick = _pending_picks.pop(ev_name, None)
+                                if not pick:
+                                    continue
+                                _active_fixtures[fixture_id] = pick
+
+                            worker_id = next(_worker_id_counter)
+                            _executor.submit(_track_match_live, pick, fixture_id, cookie, worker_id)
         except Exception:
-            continue
-
-        live_events = []
-        for sport in data.get("sportData", []):
-            for tourney in sport.get("tournaments", []):
-                for ev in tourney.get("events", []):
-                    live_events.append(ev)
-
-        for ev in live_events:
-            ev_name = ev.get("name", "").lower().replace(" vs ", " - ")
-            if ev_name in current_pending:
-                fixture_id = ev.get("id")
-                
-                with _lock:
-                    if fixture_id in _active_fixtures:
-                        continue
-                    pick = _pending_picks.pop(ev_name, None)
-                    if not pick:
-                        continue
-                    _active_fixtures[fixture_id] = pick
-
-                _executor.submit(_track_match_live, pick, fixture_id, cookie)
+            pass
+        finally:
+            time.sleep(60)
 
 
 def add_picks(picks, cookie):
@@ -315,9 +318,11 @@ def add_picks(picks, cookie):
         side = p["dominant_side"].upper()
         print(f"  {p['name']} | pick {side} | {p['criteria']}")
 
-    # 2. Add to pending queue
+    # 2. Add to pending queue, skipping already processed matches
     with _lock:
         for p in picks:
+            if p["id"] in _processed_fixtures:
+                continue
             live_name = p["name"].lower().replace(" vs ", " - ")
             if live_name not in _pending_picks:
                 _pending_picks[live_name] = p
