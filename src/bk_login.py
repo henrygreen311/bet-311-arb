@@ -31,7 +31,8 @@ ROW_ID = 1
 
 TIMEOUT             = 300_000
 MATCH_STATS_WAIT_MS = 60_000
-SR_REQUEST_WAIT_MS  = 30_000
+SR_REQUEST_WAIT_MS  = 45_000
+OVERLAY_WAIT_S      = 5
 
 
 # DB Helpers
@@ -150,7 +151,8 @@ def _extract_token_from_url(url: str):
 
 async def _extract_sr_token(page) -> str:
     """Navigate to the today page, click the first match-stats button,
-    and capture the sportradar widget token from the resulting request.
+    dismiss the overlay that blocks the widget, and capture the
+    sportradar token from the resulting request.
 
     Returns the token string, or None on any failure."""
     print("[login] opening today's matches page ...")
@@ -186,6 +188,24 @@ async def _extract_sr_token(page) -> str:
                 await page.locator(MATCH_STATS_SELECTOR).first.click(
                     timeout=15_000, force=True
                 )
+
+            # After the click, an overlay covers the widget and blocks
+            # the sportradar API from firing. Give it time to fully
+            # render, then click a neutral spot (center-right of the
+            # viewport) to dismiss it — that's what lets the widget
+            # load and fire the match_info request.
+            print(f"[login] waiting {OVERLAY_WAIT_S}s for overlay, then dismissing ...")
+            await asyncio.sleep(OVERLAY_WAIT_S)
+
+            viewport = page.viewport_size or {"width": 1920, "height": 1080}
+            x = int(viewport["width"] * 0.75)
+            y = int(viewport["height"] * 0.50)
+            try:
+                await page.mouse.click(x, y)
+                print(f"[login] clicked ({x},{y}) to dismiss overlay")
+            except Exception as e:
+                print(f"[login] overlay dismiss click failed ({e})")
+
         request = await req_info.value
     except Exception as e:
         print(f"[login] sr_token   : click / expect_request failed ({e})")
@@ -203,7 +223,7 @@ async def _extract_sr_token(page) -> str:
 async def login() -> bool:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            headless=True,
+            headless=False,
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
         # Original viewport — restored.
