@@ -319,7 +319,6 @@ def scan_once():
         _log("No matches found today.")
         return False, cookie
 
-    # Load existing data
     existing_data = {}
     if os.path.exists(OUTPUT_FILE):
         try:
@@ -337,7 +336,6 @@ def scan_once():
     for event in events:
         row = _summarize(event)
         
-        # If already processed, just update odds
         if row["id"] in existing_data:
             existing_data[row["id"]]["odds"] = _extract_odds(event)
             continue
@@ -420,7 +418,6 @@ def scan_once():
 
         summary.append(row)
 
-    # Merge existing matches with newly processed ones
     final_data = list(existing_data.values()) + summary
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:

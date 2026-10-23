@@ -322,6 +322,7 @@ def add_picks(picks, cookie):
         _log(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
 
     # 2. Add to pending queue, skipping processed/active matches
+    new_added = []
     with _lock:
         active_ids = {p["id"] for p in _active_fixtures.values()}
         for p in picks:
@@ -330,8 +331,15 @@ def add_picks(picks, cookie):
             live_name = p["name"].lower().replace(" vs ", " - ")
             if live_name not in _pending_picks:
                 _pending_picks[live_name] = p
+                new_added.append(p)
 
-    # 3. Start tracker thread if not already running
+    # 3. Log new picks
+    if new_added:
+        for p in new_added:
+            side = p["dominant_side"].upper()
+            _log(f"  [Queued] {p['name']} | {side} | {p['criteria']}")
+
+    # 4. Start tracker thread if not already running
     if not _tracker_started:
         _tracker_started = True
         threading.Thread(target=_poll_overview_loop, args=(cookie,), daemon=True).start()
