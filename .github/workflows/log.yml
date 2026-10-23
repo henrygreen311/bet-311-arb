@@ -1,0 +1,48 @@
+name: log
+
+on:
+  repository_dispatch:
+    types: [run-log]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: log-monitor
+  cancel-in-progress: true
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "playwright>=1.40.0" \
+            "supabase>=2.0.0"
+
+      - name: Install Playwright Chromium
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run bk_login.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          timeout 355m xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            python3 -u src/bk_login.py || true
