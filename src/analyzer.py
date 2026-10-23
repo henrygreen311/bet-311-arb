@@ -1,0 +1,354 @@
+import json
+import os
+import time
+import threading
+import requests
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+
+RECENT_WINDOW_DAYS = 30
+MIN_RECENT_MATCHES = 2
+MIN_STREAK_LENGTH = 3
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FILE = os.path.join(os.path.dirname(_HERE), "tt_analyzer.json")
+
+BASE_URL = "https://m.betking.com"
+OVERVIEW_URL = f"{BASE_URL}/en-ng/sports/live/api/overview/20"
+OVERVIEW_DATA = "routes/($locale).sports.live.api.overview.$sportId"
+
+EVENT_URL = f"{BASE_URL}/en-ng/sports/live/api/event"
+EVENT_DATA = "routes/($locale).sports.live.api.event"
+
+# --- Global State for Live Tracker ---
+_pending_picks = {}    # { name: pick_dict }
+_active_fixtures = {}  # { fixture_id: pick_dict }
+_lock = threading.Lock()
+_tracker_started = False
+_executor = ThreadPoolExecutor(max_workers=10)
+
+
+def _get_headers(cookie):
+    return {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": "https://m.betking.com/en-ng/sports/live/table-tennis/20",
+        "Cookie": cookie,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Gpc": "1",
+    }
+
+
+# ==========================================
+# 1. PRE-MATCH ANALYSIS
+# ==========================================
+
+def _parse_date(date_str):
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%d-%m-%y")
+    except ValueError:
+        return None
+
+
+def _last_n_wins(h2h, n, side):
+    recent = h2h[:n]
+    if len(recent) < n:
+        return False
+    return all(m.get("winner") == side for m in recent)
+
+
+def _check_h2h(h2h):
+    if not h2h:
+        return None, None
+
+    home_wins = 0
+    away_wins = 0
+    recent_count = 0
+    cutoff = datetime.utcnow() - timedelta(days=RECENT_WINDOW_DAYS)
+
+    for match in h2h:
+        winner = match.get("winner")
+        if winner == "home":
+            home_wins += 1
+        elif winner == "away":
+            away_wins += 1
+
+        d = _parse_date(match.get("date"))
+        if d and d >= cutoff:
+            recent_count += 1
+
+    total = len(h2h)
+
+    won_all = False
+    won_4_of_5 = False
+    dominant_side = None
+
+    if total > 0 and home_wins == total:
+        won_all = True
+        dominant_side = "home"
+    elif total > 0 and away_wins == total:
+        won_all = True
+        dominant_side = "away"
+    elif total == 5:
+        if home_wins == 4:
+            won_4_of_5 = True
+            dominant_side = "home"
+        elif away_wins == 4:
+            won_4_of_5 = True
+            dominant_side = "away"
+
+    if not (won_all or won_4_of_5):
+        return None, None
+
+    if recent_count < MIN_RECENT_MATCHES:
+        return None, None
+
+    if won_4_of_5 and not _last_n_wins(h2h, MIN_STREAK_LENGTH, dominant_side):
+        return None, None
+
+    criteria = "won_all" if won_all else "won_4_of_5"
+    return dominant_side, criteria
+
+
+def _check_last5(last5):
+    if not last5:
+        return False, None
+
+    total = len(last5)
+    wins = sum(1 for m in last5 if m.get("winner") == "win")
+
+    if wins == total and total > 0:
+        return True, "won_all"
+
+    if total == 5 and wins == 4:
+        if (last5[0].get("winner") == "win" and
+            last5[1].get("winner") == "win" and
+            last5[2].get("winner") == "win" and
+            last5[3].get("winner") == "win" and
+            last5[4].get("winner") == "lose"):
+            return True, "won_4_of_5"
+
+    return False, None
+
+
+def _analyze_event(event):
+    h2h = event.get("h2h") or []
+    home_last5 = event.get("home_last5") or []
+    away_last5 = event.get("away_last5") or []
+
+    h2h_dom, h2h_crit = _check_h2h(h2h)
+    if h2h_dom:
+        return {
+            "id": event.get("id"),
+            "name": event.get("name"),
+            "tournamentId": event.get("tournamentId"),
+            "dominant_side": h2h_dom,
+            "criteria": f"h2h_{h2h_crit}",
+            "odds": event.get("odds"),
+            "source": "h2h"
+        }
+
+    home_qual, home_crit = _check_last5(home_last5)
+    if home_qual:
+        return {
+            "id": event.get("id"),
+            "name": event.get("name"),
+            "tournamentId": event.get("tournamentId"),
+            "dominant_side": "home",
+            "criteria": f"home_last5_{home_crit}",
+            "odds": event.get("odds"),
+            "source": "home_last5"
+        }
+
+    away_qual, away_crit = _check_last5(away_last5)
+    if away_qual:
+        return {
+            "id": event.get("id"),
+            "name": event.get("name"),
+            "tournamentId": event.get("tournamentId"),
+            "dominant_side": "away",
+            "criteria": f"away_last5_{away_crit}",
+            "odds": event.get("odds"),
+            "source": "away_last5"
+        }
+
+    return None
+
+
+# ==========================================
+# 2. LIVE MATCH TRACKER WORKERS
+# ==========================================
+
+def _track_match_live(pick, fixture_id, cookie):
+    name = pick["name"]
+    dominant = pick["dominant_side"]
+    print(f"  [Worker] Started tracking {name} (ID: {fixture_id})")
+
+    logged_qualified = False
+
+    while True:
+        time.sleep(5)
+        url = f"{EVENT_URL}?areaId=1&fixtureId={fixture_id}&_data={EVENT_DATA}"
+        
+        try:
+            r = requests.get(url, headers=_get_headers(cookie), timeout=10)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+        except Exception:
+            continue
+
+        event = data.get("event")
+        if not event:
+            print(f"  [Worker] Match ended or removed: {name}")
+            break
+
+        scores_str = event.get("periodScores", "")
+        if not scores_str:
+            continue
+
+        sets = [s.strip() for s in scores_str.split(" - ")]
+        
+        if len(sets) >= 2:
+            try:
+                s1_home, s1_away = map(int, sets[0].split(":"))
+                s2_home, s2_away = map(int, sets[1].split(":"))
+            except ValueError:
+                continue
+
+            home_won_1 = s1_home > s1_away
+            home_won_2 = s2_home > s2_away
+
+            if dominant == "home":
+                won_first_two = home_won_1 and home_won_2
+            else:
+                won_first_two = (not home_won_1) and (not home_won_2)
+
+            # Drop if dominant didn't win first 2 sets
+            if not won_first_two:
+                print(f"  [Dropped] {name} failed to win first 2 sets ({scores_str})")
+                break
+
+            # Qualified if won first 2 sets and in set 3+
+            if won_first_two and len(sets) >= 3 and not logged_qualified:
+                logged_qualified = True
+                
+                odds_val = None
+                markets = data.get("markets", [])
+                for m in markets:
+                    if m.get("marketTypeId") == 9388: # Winner Market
+                        for sel in m.get("selections", []):
+                            if dominant == "home" and sel.get("name") == "1":
+                                odds_val = sel.get("odd", {}).get("value")
+                            elif dominant == "away" and sel.get("name") == "2":
+                                odds_val = sel.get("odd", {}).get("value")
+
+                odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
+                print(f"  [QUALIFIED] {name} | {dominant.upper()} won first 2 sets [{scores_str}] | Live Odds: {odds_str}")
+
+    # Cleanup
+    with _lock:
+        _active_fixtures.pop(fixture_id, None)
+
+
+def _poll_overview_loop(cookie):
+    global _pending_picks
+    
+    while True:
+        time.sleep(60)
+        
+        with _lock:
+            if not _pending_picks:
+                continue
+            current_pending = dict(_pending_picks)
+
+        try:
+            r = requests.get(f"{OVERVIEW_URL}?_data={OVERVIEW_DATA}", headers=_get_headers(cookie), timeout=10)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+        except Exception:
+            continue
+
+        live_events = []
+        for sport in data.get("sportData", []):
+            for tourney in sport.get("tournaments", []):
+                for ev in tourney.get("events", []):
+                    live_events.append(ev)
+
+        for ev in live_events:
+            ev_name = ev.get("name", "").lower().replace(" vs ", " - ")
+            if ev_name in current_pending:
+                fixture_id = ev.get("id")
+                
+                with _lock:
+                    if fixture_id in _active_fixtures:
+                        continue
+                    pick = _pending_picks.pop(ev_name, None)
+                    if not pick:
+                        continue
+                    _active_fixtures[fixture_id] = pick
+
+                _executor.submit(_track_match_live, pick, fixture_id, cookie)
+
+
+def add_picks(picks, cookie):
+    """Called by main.py to feed new picks to the tracker."""
+    global _tracker_started
+    if not picks:
+        return
+
+    # 1. Save to JSON file
+    try:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(picks, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
+
+    print(f"analyzer: {len(picks)} qualifying pick(s) saved to tt_analyzer.json")
+    for p in picks:
+        side = p["dominant_side"].upper()
+        print(f"  {p['name']} | pick {side} | {p['criteria']}")
+
+    # 2. Add to pending queue
+    with _lock:
+        for p in picks:
+            live_name = p["name"].lower().replace(" vs ", " - ")
+            if live_name not in _pending_picks:
+                _pending_picks[live_name] = p
+
+    # 3. Start tracker thread if not already running
+    if not _tracker_started:
+        _tracker_started = True
+        threading.Thread(target=_poll_overview_loop, args=(cookie,), daemon=True).start()
+        print("  [Tracker] Live tracking started in background (max 10 workers).")
+
+
+def analyze_file(path="TT_today.json"):
+    """Main function called by main.py."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            events = json.load(f)
+    except FileNotFoundError:
+        print(f"analyzer: {path} not found.")
+        return []
+    except json.JSONDecodeError:
+        print(f"analyzer: {path} is not valid JSON.")
+        return []
+
+    picks = []
+    for event in events:
+        p = _analyze_event(event)
+        if p:
+            picks.append(p)
+
+    if not picks:
+        print("analyzer: no qualifying picks this cycle.")
+        return []
+
+    return picks

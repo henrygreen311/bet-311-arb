@@ -1,0 +1,62 @@
+[
+  {
+    "id": 1005815991,
+    "name": "Urban, Wojciech vs Szymanski, Igor",
+    "tournamentId": 24057690,
+    "dominant_side": "home",
+    "criteria": "h2h_won_all",
+    "odds": {
+      "home": "1.36",
+      "away": "2.8"
+    },
+    "source": "h2h"
+  },
+  {
+    "id": 1005816733,
+    "name": "Jadach, Oskar vs Wiciok, Piotr",
+    "tournamentId": 24057690,
+    "dominant_side": "home",
+    "criteria": "h2h_won_all",
+    "odds": {
+      "home": "1.5",
+      "away": "2.35"
+    },
+    "source": "h2h"
+  },
+  {
+    "id": 1005814400,
+    "name": "Martinak, Lukas vs Heczko, David",
+    "tournamentId": 24032315,
+    "dominant_side": "away",
+    "criteria": "away_last5_won_4_of_5",
+    "odds": {
+      "home": "1.83",
+      "away": "1.83"
+    },
+    "source": "away_last5"
+  },
+  {
+    "id": 1005814458,
+    "name": "Mikyska, Lubos vs Necas, Miroslav",
+    "tournamentId": 24032315,
+    "dominant_side": "away",
+    "criteria": "away_last5_won_all",
+    "odds": {
+      "home": "2.22",
+      "away": "1.56"
+    },
+    "source": "away_last5"
+  },
+  {
+    "id": 1005823340,
+    "name": "Molin, Tomas vs Marsalek, Patrik",
+    "tournamentId": 22451632,
+    "dominant_side": "home",
+    "criteria": "home_last5_won_all",
+    "odds": {
+      "home": "1.74",
+      "away": "1.94"
+    },
+    "source": "home_last5"
+  }
+]

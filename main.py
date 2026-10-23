@@ -11,7 +11,7 @@ _SRC = os.path.join(_HERE, "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-import staker
+import analyzer
 
 
 def _load_db_config():
@@ -97,12 +97,24 @@ def _extract_events(payload):
 
 
 def _summarize(event):
-    raw = event.get("name") or ""
+    raw_name = event.get("name") or ""
+    raw_date = event.get("date") or ""
+    
+    date_str = ""
+    time_str = ""
+    if raw_date:
+        parts = raw_date.split("T")
+        if len(parts) == 2:
+            date_str = parts[0]
+            time_str = parts[1].replace("Z", "")
+
     return {
         "id": event.get("id"),
-        "name": raw.replace(" - ", " vs "),
+        "name": raw_name.replace(" - ", " vs "),
         "categoryId": event.get("categoryId"),
         "tournamentId": event.get("tournamentId"),
+        "date": date_str,
+        "time": time_str,
     }
 
 
@@ -225,26 +237,21 @@ def _extract_team_lastx(payload, tracked_uid, tracked_is_home):
             match_away_uid = (teams.get("away") or {}).get("uid")
 
             if match_home_uid == tracked_uid:
-                tracked_score = home_score
-                opp_score = away_score
+                tracked_is_historical_home = True
             elif match_away_uid == tracked_uid:
-                tracked_score = away_score
-                opp_score = home_score
+                tracked_is_historical_home = False
             else:
                 continue
 
-            if tracked_score == opp_score:
+            if home_score == away_score:
                 winner = "draw"
             else:
-                tracked_won = tracked_score > opp_score
-                if tracked_is_home:
-                    winner = "home" if tracked_won else "away"
-                else:
-                    winner = "away" if tracked_won else "home"
+                tracked_won = (home_score > away_score) == tracked_is_historical_home
+                winner = "win" if tracked_won else "lose"
 
             date_raw = (match.get("time") or {}).get("date") or ""
             results.append({
-                "ft": f"{tracked_score}-{opp_score}",
+                "ft": f"{home_score}-{away_score}",
                 "date": date_raw.replace("/", "-"),
                 "winner": winner,
             })
@@ -266,20 +273,20 @@ def scan_once():
         )
     except Exception as e:
         print(f"Error: supabase unavailable - {e}")
-        return False
+        return False, None
 
     if not resp.data:
         print(f"Error: no row with id={ROW_ID} in bet_arb.")
-        return False
+        return False, None
     row = resp.data[0]
     cookie = (row.get("cookie") or "").strip()
     sr_token = (row.get("sr_token") or "").strip()
     if not cookie:
         print(f"Error: cookie is empty for id={ROW_ID}.")
-        return False
+        return False, None
     if not sr_token:
         print(f"Error: sr_token is empty for id={ROW_ID}.")
-        return False
+        return False, None
 
     try:
         r = requests.get(
@@ -290,21 +297,21 @@ def scan_once():
         )
     except requests.RequestException as e:
         print(f"Error: request failed - {e}")
-        return False
+        return False, None
     if r.status_code >= 400:
         print(f"Error: server returned HTTP {r.status_code}")
-        return False
+        return False, None
 
     try:
         data = r.json()
     except ValueError:
         print("Error: response is not valid JSON.")
-        return False
+        return False, None
 
     events = _extract_events(data)
     if not events:
         print("No matches found today.")
-        return False
+        return False, cookie
 
     summary = [_summarize(e) for e in events]
     print(f"Found {len(summary)} matches.")
@@ -391,7 +398,7 @@ def scan_once():
 
     print(f"Done. {matched}/{len(summary)} events with full data.")
     print(f"Saved to {OUTPUT_FILE}.")
-    return True
+    return True, cookie
 
 
 def main():
@@ -399,19 +406,19 @@ def main():
     while True:
         cycle += 1
         print(f"\n=== Cycle {cycle} ===")
-        ok = False
-        try:
-            ok = scan_once()
-        except Exception as e:
-            print(f"Error during scan: {e}")
+        
+        ok, cookie = scan_once()
 
-        if ok:
+        if ok and cookie:
             try:
-                staker.run(OUTPUT_FILE)
+                picks = analyzer.analyze_file(OUTPUT_FILE)
+                if picks:
+                    # This adds picks to the tracker, starts background thread if needed
+                    analyzer.add_picks(picks, cookie)
             except Exception as e:
-                print(f"Error in staker: {e}")
+                print(f"Error in analyzer: {e}")
         else:
-            print("Scan failed - skipping staker this cycle.")
+            print("Scan failed - skipping analyzer this cycle.")
 
         print(f"Waiting {SCAN_INTERVAL // 60} minutes for next cycle...")
         try:
