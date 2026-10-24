@@ -76,7 +76,7 @@ def _track_results(pick, fixture_id, cookie):
     last_score = None
 
     while True:
-        time.sleep(5)
+        time.sleep(2)
         url = f"{EVENT_URL}?areaId=1&fixtureId={fixture_id}&_data={EVENT_DATA}"
         try:
             r = requests.get(url, headers=_get_headers(cookie), timeout=10)
