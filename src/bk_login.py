@@ -174,7 +174,7 @@ async def _scan_for_token(sr_urls, timeout_s: float):
         for url in list(sr_urls):
             token = _extract_token_from_url(url)
             if token:
-                print(f"[login] sr_token   : found in {url[:120]}...")
+                print("[login] sr_token   : found T= param in captured request")
                 return token
         await asyncio.sleep(SR_POLL_INTERVAL_S)
     return None
@@ -214,14 +214,14 @@ async def _extract_sr_token(page) -> str:
 
     # Collect every request to the sportradar widget host. The listener
     # lives for the whole retry loop, so nothing fired during the
-    # close/reopen cycle is missed.
+    # close/reopen cycle is missed. URLs are kept silent here — only
+    # counts are printed on the failure path.
     sr_urls: list = []
 
     def _capture(req):
         try:
             if SPORTRADAR_HOST in req.url:
                 sr_urls.append(req.url)
-                print(f"[login] sr request captured: {req.url}")
         except Exception:
             pass
 
