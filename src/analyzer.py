@@ -7,6 +7,8 @@ import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
+import results_tracker
+
 RECENT_WINDOW_DAYS = 30
 MIN_RECENT_MATCHES = 2
 MIN_STREAK_LENGTH = 3
@@ -256,7 +258,6 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
     }
 
     try:
-        # Fetch current qualified array
         resp = sb.table("bet_arb").select("qualified").eq("id", 1).execute()
         if resp.data:
             existing = resp.data[0].get("qualified") or []
@@ -265,7 +266,6 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
             
             existing.append(record)
             
-            # Save updated array back to DB
             sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
             _log(f"  [DB] Saved qualified record for {pick['name']}")
     except Exception as e:
@@ -316,6 +316,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
                 _log(f"  [worker{worker_id}] [QUALIFIED] {name} | HOME won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
                 _save_qualified_to_db(pick, period_scores, odds_val)
+                results_tracker.start_tracking(pick, fixture_id, cookie)
                 break
         else:
             if home_score > 0:
@@ -332,6 +333,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
                 _log(f"  [worker{worker_id}] [QUALIFIED] {name} | AWAY won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
                 _save_qualified_to_db(pick, period_scores, odds_val)
+                results_tracker.start_tracking(pick, fixture_id, cookie)
                 break
 
     with _lock:
@@ -390,14 +392,12 @@ def add_picks(picks, cookie):
     if not picks:
         return
 
-    # 1. Save to JSON file
     try:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(picks, f, indent=2, ensure_ascii=False)
     except Exception as e:
         _log(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
 
-    # 2. Add to pending queue, skipping processed/active matches
     new_added = []
     with _lock:
         active_ids = {p["id"] for p in _active_fixtures.values()}
@@ -409,20 +409,17 @@ def add_picks(picks, cookie):
                 _pending_picks[live_name] = p
                 new_added.append(p)
 
-    # 3. Log new picks
     if new_added:
         for p in new_added:
             side = p["dominant_side"].upper()
             _log(f"  [Queued] {p['name']} | {side} | {p['criteria']}")
 
-    # 4. Start tracker thread if not already running
     if not _tracker_started:
         _tracker_started = True
         threading.Thread(target=_poll_overview_loop, args=(cookie,), daemon=True).start()
 
 
 def analyze_file(path="TT_today.json"):
-    """Main function called by main.py."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             events = json.load(f)
