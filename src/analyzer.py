@@ -267,7 +267,7 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
             existing.append(record)
             
             sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
-            _log(f"  [DB] Saved qualified record for {pick['name']}")
+            _log(f"  [DB] Saved record for {pick['name']}")
     except Exception as e:
         _log(f"  [DB Error] Failed to save qualified record: {e}")
 
