@@ -43,6 +43,42 @@ def is_tracking():
         return _tracker_started
 
 
+# ==========================================
+# SUPABASE HELPERS
+# ==========================================
+def _load_db_config():
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "db.txt"),
+        os.path.join(os.path.dirname(here), "db.txt"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            config = {}
+            with open(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        config[k.strip()] = v.strip().strip('"')
+            return config
+    return {}
+
+
+def _get_supabase():
+    try:
+        from supabase import create_client
+        config = _load_db_config()
+        if not config:
+            return None
+        return create_client(config["SUPABASE_URL"], config["SUPABASE_KEY"])
+    except Exception as e:
+        _log(f"  [DB Error] Supabase init failed: {e}")
+        return None
+
+
 def _get_headers(cookie):
     return {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -199,6 +235,43 @@ def _analyze_event(event):
 # 2. LIVE MATCH TRACKER WORKERS
 # ==========================================
 
+def _save_qualified_to_db(pick, period_scores, odds_val):
+    """Saves the qualified match to the bet_arb.qualified JSONB column."""
+    sb = _get_supabase()
+    if not sb:
+        return
+
+    # Extract first two sets from "6:11 - 8:11 - 1:4" -> "6:11, 8:11"
+    sets = [s.strip() for s in period_scores.split(" - ")]
+    first_two_sets = ", ".join(sets[:2]) if len(sets) >= 2 else period_scores
+
+    record = {
+        "team": pick["name"],
+        "dominated": pick["dominant_side"],
+        "reason": pick["criteria"],
+        "qualified": f"{pick['dominant_side'].upper()} won first 2 sets",
+        "setscores": first_two_sets,
+        "Live Odds": str(odds_val) if odds_val else "N/A",
+        "date": datetime.utcnow().strftime("%Y-%m-%d")
+    }
+
+    try:
+        # Fetch current qualified array
+        resp = sb.table("bet_arb").select("qualified").eq("id", 1).execute()
+        if resp.data:
+            existing = resp.data[0].get("qualified") or []
+            if not isinstance(existing, list):
+                existing = []
+            
+            existing.append(record)
+            
+            # Save updated array back to DB
+            sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
+            _log(f"  [DB] Saved qualified record for {pick['name']}")
+    except Exception as e:
+        _log(f"  [DB Error] Failed to save qualified record: {e}")
+
+
 def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
@@ -223,6 +296,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
 
         home_score = event.get("homeScore")
         away_score = event.get("awayScore")
+        period_scores = event.get("periodScores", "")
 
         if home_score is None or away_score is None:
             continue
@@ -240,7 +314,8 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                             if sel.get("name") == "1":
                                 odds_val = sel.get("odd", {}).get("value")
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | HOME won first 2 sets | Live Odds: {odds_str}")
+                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | HOME won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
+                _save_qualified_to_db(pick, period_scores, odds_val)
                 break
         else:
             if home_score > 0:
@@ -255,7 +330,8 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                             if sel.get("name") == "2":
                                 odds_val = sel.get("odd", {}).get("value")
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | AWAY won first 2 sets | Live Odds: {odds_str}")
+                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | AWAY won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
+                _save_qualified_to_db(pick, period_scores, odds_val)
                 break
 
     with _lock:
