@@ -284,6 +284,19 @@ def _check_lead_condition(set_str, dominant):
         return a > 5 and (a - h) >= 3
 
 
+def _get_set_winner_odds(markets, set_number, dominant):
+    """Extracts the live odds for the dominant side from the Set Winner market."""
+    for m in markets:
+        # 10635 is the Set Winner market
+        if m.get("marketTypeId") == 10635 and str(m.get("specialValue")) == str(set_number):
+            for sel in m.get("selections", []):
+                if dominant == "home" and sel.get("name") == "1":
+                    return sel.get("odd", {}).get("value")
+                elif dominant == "away" and sel.get("name") == "2":
+                    return sel.get("odd", {}).get("value")
+    return None
+
+
 def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
@@ -311,30 +324,23 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
 
         if len(sets) >= 1:
             if _check_lead_condition(sets[0], dominant):
-                odds_val = None
-                for m in data.get("markets", []):
-                    if m.get("marketTypeId") == 9388:
-                        for sel in m.get("selections", []):
-                            if (dominant == "home" and sel.get("name") == "1") or (dominant == "away" and sel.get("name") == "2"):
-                                odds_val = sel.get("odd", {}).get("value")
+                # Qualified in Set 1
+                odds_val = _get_set_winner_odds(data.get("markets", []), 1, dominant)
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 1 [{sets[0]}] | Live Odds: {odds_str}")
+                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 1 [{sets[0]}] | Set Odds: {odds_str}")
                 _save_qualified_to_db(pick, sets[0], odds_val)
                 break
 
         if len(sets) >= 2:
             if _check_lead_condition(sets[1], dominant):
-                odds_val = None
-                for m in data.get("markets", []):
-                    if m.get("marketTypeId") == 9388:
-                        for sel in m.get("selections", []):
-                            if (dominant == "home" and sel.get("name") == "1") or (dominant == "away" and sel.get("name") == "2"):
-                                odds_val = sel.get("odd", {}).get("value")
+                # Qualified in Set 2
+                odds_val = _get_set_winner_odds(data.get("markets", []), 2, dominant)
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 2 [{sets[0]}, {sets[1]}] | Live Odds: {odds_str}")
+                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 2 [{sets[0]}, {sets[1]}] | Set Odds: {odds_str}")
                 _save_qualified_to_db(pick, f"{sets[0]}, {sets[1]}", odds_val)
                 break
 
+            # If set 3 has started and no qualification, drop it
             if len(sets) >= 3:
                 _log(f"  [L3-worker{worker_id}] [L3-Dropped] {name} failed to lead by 3 in first 2 sets (scores: {period_scores})")
                 break
