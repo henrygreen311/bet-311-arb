@@ -34,7 +34,6 @@ _show_logs = True
 
 
 def set_logs(enabled):
-    """Toggle console logs for this module on/off."""
     global _show_logs
     _show_logs = enabled
 
@@ -83,7 +82,7 @@ def _get_supabase():
             return None
         return create_client(config["SUPABASE_URL"], config["SUPABASE_KEY"])
     except Exception as e:
-        _log(f"  [DB Error] Supabase init failed: {e}")
+        _log(f"  [L3-DB Error] Supabase init failed: {e}")
         return None
 
 
@@ -268,9 +267,9 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
             existing.append(record)
             
             sb.table("bet_arb").update({"qualified_2": existing}).eq("id", 1).execute()
-            _log(f"  [DB] Saved qualified_2 record for {pick['name']}")
+            _log(f"  [L3-DB] Saved qualified_2 record for {pick['name']}")
     except Exception as e:
-        _log(f"  [DB Error] Failed to save qualified_2 record: {e}")
+        _log(f"  [L3-DB Error] Failed to save qualified_2 record: {e}")
 
 
 def _check_lead_condition(set_str, dominant):
@@ -288,7 +287,7 @@ def _check_lead_condition(set_str, dominant):
 def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
-    _log(f"  [worker{worker_id}] Started tracking lead by 3 for {name} (ID: {fixture_id})")
+    _log(f"  [L3-worker{worker_id}] Started tracking lead by 3 for {name} (ID: {fixture_id})")
 
     while True:
         time.sleep(2)
@@ -304,7 +303,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
 
         event = data.get("event")
         if not event:
-            _log(f"  [worker{worker_id}] Match ended or removed: {name}")
+            _log(f"  [L3-worker{worker_id}] Match ended or removed: {name}")
             break
 
         period_scores = event.get("periodScores", "")
@@ -319,7 +318,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                             if (dominant == "home" and sel.get("name") == "1") or (dominant == "away" and sel.get("name") == "2"):
                                 odds_val = sel.get("odd", {}).get("value")
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 1 [{sets[0]}] | Live Odds: {odds_str}")
+                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 1 [{sets[0]}] | Live Odds: {odds_str}")
                 _save_qualified_to_db(pick, sets[0], odds_val)
                 break
 
@@ -332,12 +331,12 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                             if (dominant == "home" and sel.get("name") == "1") or (dominant == "away" and sel.get("name") == "2"):
                                 odds_val = sel.get("odd", {}).get("value")
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 2 [{sets[0]}, {sets[1]}] | Live Odds: {odds_str}")
+                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 2 [{sets[0]}, {sets[1]}] | Live Odds: {odds_str}")
                 _save_qualified_to_db(pick, f"{sets[0]}, {sets[1]}", odds_val)
                 break
 
             if len(sets) >= 3:
-                _log(f"  [worker{worker_id}] [Dropped] {name} failed to lead by 3 in first 2 sets (scores: {period_scores})")
+                _log(f"  [L3-worker{worker_id}] [L3-Dropped] {name} failed to lead by 3 in first 2 sets (scores: {period_scores})")
                 break
 
     with _lock:
@@ -415,7 +414,7 @@ def add_picks(picks, cookie):
     if new_added:
         for p in new_added:
             side = p["dominant_side"].upper()
-            _log(f"  [Queued-3] {p['name']} | {side} | {p['criteria']}")
+            _log(f"  [L3-Queued] {p['name']} | {side} | {p['criteria']}")
 
     if not _tracker_started:
         _tracker_started = True

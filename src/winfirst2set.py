@@ -36,7 +36,6 @@ _show_logs = True
 
 
 def set_logs(enabled):
-    """Toggle console logs for this module on/off."""
     global _show_logs
     _show_logs = enabled
 
@@ -85,7 +84,7 @@ def _get_supabase():
             return None
         return create_client(config["SUPABASE_URL"], config["SUPABASE_KEY"])
     except Exception as e:
-        _log(f"  [DB Error] Supabase init failed: {e}")
+        _log(f"  [W2-DB Error] Supabase init failed: {e}")
         return None
 
 
@@ -273,15 +272,15 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
             existing.append(record)
             
             sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
-            _log(f"  [DB] Saved qualified record for {pick['name']}")
+            _log(f"  [W2-DB] Saved qualified record for {pick['name']}")
     except Exception as e:
-        _log(f"  [DB Error] Failed to save qualified record: {e}")
+        _log(f"  [W2-DB Error] Failed to save qualified record: {e}")
 
 
 def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
-    _log(f"  [worker{worker_id}] Started tracking {name} (ID: {fixture_id})")
+    _log(f"  [W2-worker{worker_id}] Started tracking {name} (ID: {fixture_id})")
 
     while True:
         time.sleep(5)
@@ -297,7 +296,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
 
         event = data.get("event")
         if not event:
-            _log(f"  [worker{worker_id}] Match ended or removed: {name}")
+            _log(f"  [W2-worker{worker_id}] Match ended or removed: {name}")
             break
 
         home_score = event.get("homeScore")
@@ -309,7 +308,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
 
         if dominant == "home":
             if away_score > 0:
-                _log(f"  [worker{worker_id}] [Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
+                _log(f"  [W2-worker{worker_id}] [W2-Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
                 break
             if home_score >= 2:
                 odds_val = None
@@ -320,13 +319,13 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                             if sel.get("name") == "1":
                                 odds_val = sel.get("odd", {}).get("value")
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | HOME won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
+                _log(f"  [W2-worker{worker_id}] [W2-QUALIFIED] {name} | HOME won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
                 _save_qualified_to_db(pick, period_scores, odds_val)
                 results_tracker.start_tracking(pick, fixture_id, cookie)
                 break
         else:
             if home_score > 0:
-                _log(f"  [worker{worker_id}] [Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
+                _log(f"  [W2-worker{worker_id}] [W2-Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
                 break
             if away_score >= 2:
                 odds_val = None
@@ -337,7 +336,7 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
                             if sel.get("name") == "2":
                                 odds_val = sel.get("odd", {}).get("value")
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [worker{worker_id}] [QUALIFIED] {name} | AWAY won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
+                _log(f"  [W2-worker{worker_id}] [W2-QUALIFIED] {name} | AWAY won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
                 _save_qualified_to_db(pick, period_scores, odds_val)
                 results_tracker.start_tracking(pick, fixture_id, cookie)
                 break
@@ -417,7 +416,7 @@ def add_picks(picks, cookie):
     if new_added:
         for p in new_added:
             side = p["dominant_side"].upper()
-            _log(f"  [Queued] {p['name']} | {side} | {p['criteria']}")
+            _log(f"  [W2-Queued] {p['name']} | {side} | {p['criteria']}")
 
     if not _tracker_started:
         _tracker_started = True
