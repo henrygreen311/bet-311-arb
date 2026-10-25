@@ -12,9 +12,18 @@ _executor = ThreadPoolExecutor(max_workers=20)
 _lock = threading.Lock()
 _print_lock = threading.Lock()
 _tracked_fixtures = set()
+_show_logs = True
+
+
+def set_logs(enabled):
+    """Toggle console logs for this module on/off."""
+    global _show_logs
+    _show_logs = enabled
 
 
 def _log(*args, **kwargs):
+    if not _show_logs:
+        return
     with _print_lock:
         print(*args, **kwargs, flush=True)
 
@@ -56,7 +65,6 @@ def _update_final_scores_in_db(team_name, finalscores, results):
             if resp.data:
                 existing = resp.data[0].get("qualified") or []
                 updated = False
-                # Find the most recent record for this team
                 for r in reversed(existing):
                     if r.get("team") == team_name:
                         r["finalscores"] = finalscores
@@ -76,7 +84,7 @@ def _track_results(pick, fixture_id, cookie):
     last_score = None
 
     while True:
-        time.sleep(2)
+        time.sleep(5)
         url = f"{EVENT_URL}?areaId=1&fixtureId={fixture_id}&_data={EVENT_DATA}"
         try:
             r = requests.get(url, headers=_get_headers(cookie), timeout=10)
@@ -90,9 +98,7 @@ def _track_results(pick, fixture_id, cookie):
         if not event:
             _log(f"  [Result Worker] Match ended: {team_name}")
             if last_period_scores and last_score:
-                # Convert "6:11 - 8:11" to "6:11, 8:11"
                 finals = last_period_scores.replace(" - ", ", ")
-                # Convert "1:3" to "1-3"
                 results = last_score.replace(":", "-")
                 _update_final_scores_in_db(team_name, finals, results)
             break

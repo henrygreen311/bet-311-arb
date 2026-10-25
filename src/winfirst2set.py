@@ -14,7 +14,7 @@ MIN_RECENT_MATCHES = 2
 MIN_STREAK_LENGTH = 3
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(os.path.dirname(_HERE), "tt_analyzer.json")
+OUTPUT_FILE = os.path.join(os.path.dirname(_HERE), "tt_winfirst2set.json")
 
 BASE_URL = "https://m.betking.com"
 OVERVIEW_URL = f"{BASE_URL}/en-ng/sports/live/api/overview/20"
@@ -24,18 +24,26 @@ EVENT_URL = f"{BASE_URL}/en-ng/sports/live/api/event"
 EVENT_DATA = "routes/($locale).sports.live.api.event"
 
 # --- Global State for Live Tracker ---
-_pending_picks = {}          # { name: pick_dict }
-_active_fixtures = {}        # { fixture_id: pick_dict }
-_processed_fixtures = set()  # { pick_id } - Matches that dropped/finished
+_pending_picks = {}
+_active_fixtures = {}
+_processed_fixtures = set()
 _lock = threading.Lock()
 _print_lock = threading.Lock()
 _tracker_started = False
 _executor = ThreadPoolExecutor(max_workers=10)
 _worker_id_counter = itertools.count(1)
+_show_logs = True
+
+
+def set_logs(enabled):
+    """Toggle console logs for this module on/off."""
+    global _show_logs
+    _show_logs = enabled
 
 
 def _log(*args, **kwargs):
-    """Thread-safe logging for workers."""
+    if not _show_logs:
+        return
     with _print_lock:
         print(*args, **kwargs, flush=True)
 
@@ -238,12 +246,10 @@ def _analyze_event(event):
 # ==========================================
 
 def _save_qualified_to_db(pick, period_scores, odds_val):
-    """Saves the qualified match to the bet_arb.qualified JSONB column."""
     sb = _get_supabase()
     if not sb:
         return
 
-    # Extract first two sets from "6:11 - 8:11 - 1:4" -> "6:11, 8:11"
     sets = [s.strip() for s in period_scores.split(" - ")]
     first_two_sets = ", ".join(sets[:2]) if len(sets) >= 2 else period_scores
 
@@ -267,7 +273,7 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
             existing.append(record)
             
             sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
-            _log(f"  [DB] Saved record for {pick['name']}")
+            _log(f"  [DB] Saved qualified record for {pick['name']}")
     except Exception as e:
         _log(f"  [DB Error] Failed to save qualified record: {e}")
 
@@ -387,7 +393,6 @@ def _poll_overview_loop(cookie):
 
 
 def add_picks(picks, cookie):
-    """Called by main.py to feed new picks to the tracker."""
     global _tracker_started
     if not picks:
         return
@@ -396,7 +401,7 @@ def add_picks(picks, cookie):
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(picks, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        _log(f"analyzer: failed to save {OUTPUT_FILE} - {e}")
+        _log(f"winfirst2set: failed to save {OUTPUT_FILE} - {e}")
 
     new_added = []
     with _lock:
@@ -424,10 +429,10 @@ def analyze_file(path="TT_today.json"):
         with open(path, "r", encoding="utf-8") as f:
             events = json.load(f)
     except FileNotFoundError:
-        _log(f"analyzer: {path} not found.")
+        _log(f"winfirst2set: {path} not found.")
         return []
     except json.JSONDecodeError:
-        _log(f"analyzer: {path} is not valid JSON.")
+        _log(f"winfirst2set: {path} is not valid JSON.")
         return []
 
     picks = []
