@@ -242,7 +242,7 @@ def _analyze_event(event):
 # 2. LIVE MATCH TRACKER WORKERS
 # ==========================================
 
-def _save_qualified_to_db(pick, period_scores, odds_val):
+def _save_qualified_to_db(pick, qual_setscores, finished_set, odds_val):
     sb = _get_supabase()
     if not sb:
         return
@@ -252,7 +252,8 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
         "dominated": pick["dominant_side"],
         "reason": pick["criteria"],
         "qualified": f"{pick['dominant_side'].upper()} led by 3 points",
-        "setscores": period_scores.replace(" - ", ", "),
+        "setscores": qual_setscores,
+        "finished_set": finished_set,
         "Live Odds": str(odds_val) if odds_val else "N/A",
         "date": datetime.utcnow().strftime("%Y-%m-%d")
     }
@@ -285,9 +286,7 @@ def _check_lead_condition(set_str, dominant):
 
 
 def _get_set_winner_odds(markets, set_number, dominant):
-    """Extracts the live odds for the dominant side from the Set Winner market."""
     for m in markets:
-        # 10635 is the Set Winner market
         if m.get("marketTypeId") == 10635 and str(m.get("specialValue")) == str(set_number):
             for sel in m.get("selections", []):
                 if dominant == "home" and sel.get("name") == "1":
@@ -297,10 +296,23 @@ def _get_set_winner_odds(markets, set_number, dominant):
     return None
 
 
+def _is_set_complete(set_str):
+    """A table-tennis set is complete when one side reaches 11+ with a 2+ point lead."""
+    try:
+        h, a = map(int, set_str.split(":"))
+        return max(h, a) >= 11 and abs(h - a) >= 2
+    except ValueError:
+        return False
+
+
 def _track_match_live(pick, fixture_id, cookie, worker_id):
     name = pick["name"]
     dominant = pick["dominant_side"]
     _log(f"  [L3-worker{worker_id}] Started tracking lead by 3 for {name} (ID: {fixture_id})")
+
+    qualified_set = None          # 1 or 2
+    qualified_score_at = None     # e.g. "6:3"
+    qualified_odds = None         # odds captured at the qualification moment
 
     while True:
         time.sleep(2)
@@ -322,28 +334,52 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
         period_scores = event.get("periodScores", "")
         sets = [s.strip() for s in period_scores.split(" - ")]
 
-        if len(sets) >= 1:
-            if _check_lead_condition(sets[0], dominant):
-                # Qualified in Set 1
-                odds_val = _get_set_winner_odds(data.get("markets", []), 1, dominant)
-                odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 1 [{sets[0]}] | Set Odds: {odds_str}")
-                _save_qualified_to_db(pick, sets[0], odds_val)
-                break
-
-        if len(sets) >= 2:
-            if _check_lead_condition(sets[1], dominant):
-                # Qualified in Set 2
-                odds_val = _get_set_winner_odds(data.get("markets", []), 2, dominant)
-                odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
-                _log(f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | {dominant.upper()} led by 3 in Set 2 [{sets[0]}, {sets[1]}] | Set Odds: {odds_str}")
-                _save_qualified_to_db(pick, f"{sets[0]}, {sets[1]}", odds_val)
-                break
-
-            # If set 3 has started and no qualification, drop it
-            if len(sets) >= 3:
+        # ---------------- PHASE 1: Detect qualification ----------------
+        if qualified_set is None:
+            if len(sets) >= 1 and _check_lead_condition(sets[0], dominant):
+                qualified_set = 1
+                qualified_score_at = sets[0]
+                qualified_odds = _get_set_winner_odds(data.get("markets", []), 1, dominant)
+                continue  # now wait for set 1 to finish
+            elif len(sets) >= 2 and _check_lead_condition(sets[1], dominant):
+                qualified_set = 2
+                qualified_score_at = sets[1]
+                qualified_odds = _get_set_winner_odds(data.get("markets", []), 2, dominant)
+                continue  # now wait for set 2 to finish
+            elif len(sets) >= 3:
                 _log(f"  [L3-worker{worker_id}] [L3-Dropped] {name} failed to lead by 3 in first 2 sets (scores: {period_scores})")
                 break
+            continue
+
+        # ---------------- PHASE 2: Wait for qualified set to finish ----------------
+        set_index = qualified_set - 1
+        if len(sets) <= set_index:
+            continue
+
+        current_set_score = sets[set_index]
+        next_set_started = len(sets) > set_index + 1
+        set_finished = _is_set_complete(current_set_score)
+
+        if not (next_set_started or set_finished):
+            continue  # set still in progress
+
+        # Set is done — log + save with both the qualification score and final score
+        final_set_score = current_set_score
+
+        if qualified_set == 1:
+            setscores_display = qualified_score_at
+        else:
+            # If qualified in set 2, prepend set 1's final score
+            setscores_display = f"{sets[0]}, {qualified_score_at}"
+
+        odds_str = f"@ {qualified_odds}" if qualified_odds else "(Odds unavailable)"
+        _log(
+            f"  [L3-worker{worker_id}] [L3-QUALIFIED] {name} | "
+            f"{dominant.upper()} led by 3 at {qualified_score_at} in Set {qualified_set}, "
+            f"set finished {final_set_score} | Set Odds: {odds_str}"
+        )
+        _save_qualified_to_db(pick, setscores_display, final_set_score, qualified_odds)
+        break
 
     with _lock:
         _active_fixtures.pop(fixture_id, None)
