@@ -12,14 +12,13 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 import winfirst2set
-import leadwith3
 import results_tracker
 
-# LOG TOGGLES 
+
 SHOW_MAIN_LOGS = True              
 SHOW_WINFIRST2SET_LOGS = True     
-SHOW_LEADWITH3_LOGS = True         
-SHOW_RESULTS_TRACKER_LOGS = False
+SHOW_RESULTS_TRACKER_LOGS = False  
+
 
 def _load_db_config():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -67,7 +66,7 @@ SCAN_INTERVAL = 5 * 60
 def _log(*args, **kwargs):
     if not SHOW_MAIN_LOGS:
         return
-    if not winfirst2set.is_tracking() and not leadwith3.is_tracking():
+    if not winfirst2set.is_tracking():
         print(*args, **kwargs)
 
 
@@ -437,9 +436,7 @@ def scan_once():
 
 
 def main():
-    # Apply log toggles
     winfirst2set.set_logs(SHOW_WINFIRST2SET_LOGS)
-    leadwith3.set_logs(SHOW_LEADWITH3_LOGS)
     results_tracker.set_logs(SHOW_RESULTS_TRACKER_LOGS)
 
     cycle = 0
@@ -451,20 +448,13 @@ def main():
 
         if ok and cookie:
             try:
-                # Strategy 1: Win First 2 Sets
                 picks_1 = winfirst2set.analyze_file(OUTPUT_FILE)
                 if picks_1:
                     winfirst2set.add_picks(picks_1, cookie)
-                
-                # Strategy 2: Lead by 3 points in first 2 sets
-                picks_3 = leadwith3.analyze_file(OUTPUT_FILE)
-                if picks_3:
-                    leadwith3.add_picks(picks_3, cookie)
-
             except Exception as e:
-                _log(f"Error in trackers: {e}")
+                _log(f"Error in winfirst2set: {e}")
         else:
-            _log("Scan failed - skipping trackers this cycle.")
+            _log("Scan failed - skipping winfirst2set this cycle.")
 
         _log(f"Waiting {SCAN_INTERVAL // 60} minutes for next cycle...")
         try:
