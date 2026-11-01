@@ -288,7 +288,7 @@ async def login() -> bool:
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
         # Original viewport — restored.
-        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        context = await browser.new_context(viewport={"width": 1500, "height": 900})
         page = await context.new_page()
 
         print("[login] opening home page ...")

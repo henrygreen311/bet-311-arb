@@ -143,57 +143,37 @@ def _check_h2h(h2h):
             recent_count += 1
 
     total = len(h2h)
-
-    won_all = False
-    won_4_of_5 = False
     dominant_side = None
 
     if total > 0 and home_wins == total:
-        won_all = True
         dominant_side = "home"
     elif total > 0 and away_wins == total:
-        won_all = True
         dominant_side = "away"
-    elif total == 5:
-        if home_wins == 4:
-            won_4_of_5 = True
-            dominant_side = "home"
-        elif away_wins == 4:
-            won_4_of_5 = True
-            dominant_side = "away"
 
-    if not (won_all or won_4_of_5):
+    if not dominant_side:
         return None, None
 
     if recent_count < MIN_RECENT_MATCHES:
         return None, None
 
-    if won_4_of_5 and not _last_n_wins(h2h, MIN_STREAK_LENGTH, dominant_side):
-        return None, None
-
-    criteria = "won_all" if won_all else "won_4_of_5"
-    return dominant_side, criteria
+    return dominant_side, "won_all"
 
 
-def _check_last5(last5):
+def _fmt_form(last5):
+    """Converts last5 matches into W/L string like 'W.W.L.W.L' (newest to oldest)."""
     if not last5:
-        return False, None
-
-    total = len(last5)
-    wins = sum(1 for m in last5 if m.get("winner") == "win")
-
-    if wins == total and total > 0:
-        return True, "won_all"
-
-    if total == 5 and wins == 4:
-        if (last5[0].get("winner") == "win" and
-            last5[1].get("winner") == "win" and
-            last5[2].get("winner") == "win" and
-            last5[3].get("winner") == "win" and
-            last5[4].get("winner") == "lose"):
-            return True, "won_4_of_5"
-
-    return False, None
+        return "N/A"
+    
+    form_list = []
+    for m in last5:
+        if m.get("winner") == "win":
+            form_list.append("W")
+        elif m.get("winner") == "lose":
+            form_list.append("L")
+        else:
+            form_list.append("-")
+            
+    return ".".join(form_list)
 
 
 def _analyze_event(event):
@@ -210,31 +190,9 @@ def _analyze_event(event):
             "dominant_side": h2h_dom,
             "criteria": f"h2h_{h2h_crit}",
             "odds": event.get("odds"),
+            "form_home": _fmt_form(home_last5),
+            "form_away": _fmt_form(away_last5),
             "source": "h2h"
-        }
-
-    home_qual, home_crit = _check_last5(home_last5)
-    if home_qual:
-        return {
-            "id": event.get("id"),
-            "name": event.get("name"),
-            "tournamentId": event.get("tournamentId"),
-            "dominant_side": "home",
-            "criteria": f"home_last5_{home_crit}",
-            "odds": event.get("odds"),
-            "source": "home_last5"
-        }
-
-    away_qual, away_crit = _check_last5(away_last5)
-    if away_qual:
-        return {
-            "id": event.get("id"),
-            "name": event.get("name"),
-            "tournamentId": event.get("tournamentId"),
-            "dominant_side": "away",
-            "criteria": f"away_last5_{away_crit}",
-            "odds": event.get("odds"),
-            "source": "away_last5"
         }
 
     return None
@@ -244,7 +202,22 @@ def _analyze_event(event):
 # 2. LIVE MATCH TRACKER WORKERS
 # ==========================================
 
-def _save_qualified_to_db(pick, period_scores, odds_val):
+def _fmt_pre_match_odds(odds):
+    """Converts {'home': '2.10', 'away': '1.65'} -> 'H@2.10,A@1.65'"""
+    if not odds:
+        return "N/A"
+    h = odds.get("home")
+    a = odds.get("away")
+    if h is not None and a is not None:
+        return f"H@{h},A@{a}"
+    if h is not None:
+        return f"H@{h}"
+    if a is not None:
+        return f"A@{a}"
+    return "N/A"
+
+
+def _save_to_db(pick, period_scores, odds_val, column="qualified"):
     sb = _get_supabase()
     if not sb:
         return
@@ -252,29 +225,38 @@ def _save_qualified_to_db(pick, period_scores, odds_val):
     sets = [s.strip() for s in period_scores.split(" - ")]
     first_two_sets = ", ".join(sets[:2]) if len(sets) >= 2 else period_scores
 
+    qualified_str = (
+        f"{pick['dominant_side'].upper()} won first 2 sets" 
+        if column == "qualified" 
+        else f"{pick['dominant_side'].upper()} failed to win first 2 sets"
+    )
+
     record = {
         "team": pick["name"],
         "dominated": pick["dominant_side"],
         "reason": pick["criteria"],
-        "qualified": f"{pick['dominant_side'].upper()} won first 2 sets",
+        "qualified": qualified_str,
         "setscores": first_two_sets,
+        "pre_match_odds": _fmt_pre_match_odds(pick.get("odds")),
+        "form_home": pick.get("form_home"),
+        "form_away": pick.get("form_away"),
         "Live Odds": str(odds_val) if odds_val else "N/A",
         "date": datetime.utcnow().strftime("%Y-%m-%d")
     }
 
     try:
-        resp = sb.table("bet_arb").select("qualified").eq("id", 1).execute()
+        resp = sb.table("bet_arb").select(column).eq("id", 1).execute()
         if resp.data:
-            existing = resp.data[0].get("qualified") or []
+            existing = resp.data[0].get(column) or []
             if not isinstance(existing, list):
                 existing = []
             
             existing.append(record)
             
-            sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
-            _log(f"  [W2-DB] Saved qualified record for {pick['name']}")
+            sb.table("bet_arb").update({column: existing}).eq("id", 1).execute()
+            _log(f"  [W2-DB] Saved record for {pick['name']} into {column}")
     except Exception as e:
-        _log(f"  [W2-DB Error] Failed to save qualified record: {e}")
+        _log(f"  [W2-DB Error] Failed to save record to {column}: {e}")
 
 
 def _track_match_live(pick, fixture_id, cookie, worker_id):
@@ -306,39 +288,42 @@ def _track_match_live(pick, fixture_id, cookie, worker_id):
         if home_score is None or away_score is None:
             continue
 
+        # Helper to grab current live odds
+        def get_live_odds():
+            for m in data.get("markets", []):
+                if m.get("marketTypeId") == 9388:
+                    for sel in m.get("selections", []):
+                        if dominant == "home" and sel.get("name") == "1":
+                            return sel.get("odd", {}).get("value")
+                        elif dominant == "away" and sel.get("name") == "2":
+                            return sel.get("odd", {}).get("value")
+            return None
+
         if dominant == "home":
             if away_score > 0:
                 _log(f"  [W2-worker{worker_id}] [W2-Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
+                _save_to_db(pick, period_scores, get_live_odds(), column="qualified_lose")
+                results_tracker.start_tracking(pick, fixture_id, cookie, column="qualified_lose")
                 break
             if home_score >= 2:
-                odds_val = None
-                markets = data.get("markets", [])
-                for m in markets:
-                    if m.get("marketTypeId") == 9388:
-                        for sel in m.get("selections", []):
-                            if sel.get("name") == "1":
-                                odds_val = sel.get("odd", {}).get("value")
+                odds_val = get_live_odds()
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
                 _log(f"  [W2-worker{worker_id}] [W2-QUALIFIED] {name} | HOME won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
-                _save_qualified_to_db(pick, period_scores, odds_val)
-                results_tracker.start_tracking(pick, fixture_id, cookie)
+                _save_to_db(pick, period_scores, odds_val, column="qualified")
+                results_tracker.start_tracking(pick, fixture_id, cookie, column="qualified")
                 break
         else:
             if home_score > 0:
                 _log(f"  [W2-worker{worker_id}] [W2-Dropped] {name} failed to win first 2 sets (score: {home_score}:{away_score})")
+                _save_to_db(pick, period_scores, get_live_odds(), column="qualified_lose")
+                results_tracker.start_tracking(pick, fixture_id, cookie, column="qualified_lose")
                 break
             if away_score >= 2:
-                odds_val = None
-                markets = data.get("markets", [])
-                for m in markets:
-                    if m.get("marketTypeId") == 9388:
-                        for sel in m.get("selections", []):
-                            if sel.get("name") == "2":
-                                odds_val = sel.get("odd", {}).get("value")
+                odds_val = get_live_odds()
                 odds_str = f"@ {odds_val}" if odds_val else "(Odds unavailable)"
                 _log(f"  [W2-worker{worker_id}] [W2-QUALIFIED] {name} | AWAY won first 2 sets [{period_scores}] | Live Odds: {odds_str}")
-                _save_qualified_to_db(pick, period_scores, odds_val)
-                results_tracker.start_tracking(pick, fixture_id, cookie)
+                _save_to_db(pick, period_scores, odds_val, column="qualified")
+                results_tracker.start_tracking(pick, fixture_id, cookie, column="qualified")
                 break
 
     with _lock:
@@ -416,7 +401,7 @@ def add_picks(picks, cookie):
     if new_added:
         for p in new_added:
             side = p["dominant_side"].upper()
-            _log(f"  [W2-Queued] {p['name']} | {side} | {p['criteria']}")
+            _log(f"  [W2-Queued] {p['name']} | {side} | {p['criteria']} | Form H:{p['form_home']} A:{p['form_away']}")
 
     if not _tracker_started:
         _tracker_started = True
