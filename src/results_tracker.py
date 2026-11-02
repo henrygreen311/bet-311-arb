@@ -55,15 +55,15 @@ def _get_headers(cookie):
     }
 
 
-def _update_final_scores_in_db(team_name, finalscores, results):
+def _update_final_scores_in_db(team_name, finalscores, results, column):
     sb = _get_supabase()
     if not sb:
         return
     with _lock:
         try:
-            resp = sb.table("bet_arb").select("qualified").eq("id", 1).execute()
+            resp = sb.table("bet_arb").select(column).eq("id", 1).execute()
             if resp.data:
-                existing = resp.data[0].get("qualified") or []
+                existing = resp.data[0].get(column) or []
                 updated = False
                 for r in reversed(existing):
                     if r.get("team") == team_name:
@@ -72,13 +72,13 @@ def _update_final_scores_in_db(team_name, finalscores, results):
                         updated = True
                         break
                 if updated:
-                    sb.table("bet_arb").update({"qualified": existing}).eq("id", 1).execute()
-                    _log(f"  [Result Worker] DB updated final scores for {team_name}")
+                    sb.table("bet_arb").update({column: existing}).eq("id", 1).execute()
+                    _log(f"  [Result Worker] DB updated final scores for {team_name} in {column}")
         except Exception as e:
             _log(f"  [Result Worker] DB Error: {e}")
 
 
-def _track_results(pick, fixture_id, cookie):
+def _track_results(pick, fixture_id, cookie, column):
     team_name = pick["name"]
     last_period_scores = None
     last_score = None
@@ -96,11 +96,11 @@ def _track_results(pick, fixture_id, cookie):
         
         event = data.get("event")
         if not event:
-            _log(f"  [Result Worker] Match ended: {team_name}")
+            _log(f"  [Result Worker] Match ended: {team_name} (target: {column})")
             if last_period_scores and last_score:
                 finals = last_period_scores.replace(" - ", ", ")
                 results = last_score.replace(":", "-")
-                _update_final_scores_in_db(team_name, finals, results)
+                _update_final_scores_in_db(team_name, finals, results, column)
             break
 
         ps = event.get("periodScores")
@@ -111,11 +111,12 @@ def _track_results(pick, fixture_id, cookie):
             last_score = sc
 
 
-def start_tracking(pick, fixture_id, cookie):
+def start_tracking(pick, fixture_id, cookie, column="qualified"):
+    track_key = (fixture_id, column)
     with _lock:
-        if fixture_id in _tracked_fixtures:
+        if track_key in _tracked_fixtures:
             return
-        _tracked_fixtures.add(fixture_id)
+        _tracked_fixtures.add(track_key)
     
-    _log(f"  [Result Worker] Started tracking final results for {pick['name']} (ID: {fixture_id})")
-    _executor.submit(_track_results, pick, fixture_id, cookie)
+    _log(f"  [Result Worker] Started tracking final results for {pick['name']} (ID: {fixture_id}) -> {column}")
+    _executor.submit(_track_results, pick, fixture_id, cookie, column)
