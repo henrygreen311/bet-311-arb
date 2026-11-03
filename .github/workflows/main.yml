@@ -2,7 +2,7 @@ name: betking
 
 on:
 repository_dispatch:
-types: [run-betking]
+types: [run-sporty]
 workflow_dispatch:
 schedule:
 - cron: "0 */6 * * *"
